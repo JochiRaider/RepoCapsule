@@ -20,7 +20,7 @@
     <a href="https://github.com/JochiRaider/repocapsule/issues">Request Feature</a>
   </p>
 </div>
-
+![Logo](img/logo.png)
 <details>
   <summary>Table of Contents</summary>
   <ol>
