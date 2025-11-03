@@ -11,7 +11,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="logo.png" />
     <source media="(prefers-color-scheme: light)" srcset="logo.png" />
-    <img alt="RepoCapsule logo" src="logo.png" width="160" height="160" />
+    <img alt="RepoCapsule logo" src="logo.png" width="auto" height="auto" />
   </picture>
   <h1>RepoCapsule</h1>
   <p>
