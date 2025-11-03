@@ -13,11 +13,11 @@
     Repository → JSONL converter with robust decoding, structure‑aware chunking, Markdown→KQL extraction, and GitHub streaming helpers — ideal for pre‑training corpora and RAG.
   </p>
   <p>
-    <a href="https://github.com/your-org/repocapsule"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/JochiRaider/repocapsule"><strong>Explore the docs »</strong></a>
     ·
-    <a href="https://github.com/your-org/repocapsule/issues">Report Bug</a>
+    <a href="https://github.com/JochiRaider/repocapsule/issues">Report Bug</a>
     ·
-    <a href="https://github.com/your-org/repocapsule/issues">Request Feature</a>
+    <a href="https://github.com/JochiRaider/repocapsule/issues">Request Feature</a>
   </p>
 </div>
 
@@ -264,14 +264,14 @@ Open an issue on GitHub or start a discussion. You can also file bugs anonymousl
 
 ---
 
-[contributors-shield]: https://img.shields.io/github/contributors/your-org/repocapsule.svg?style=for-the-badge
+[contributors-shield]: https://img.shields.io/github/contributors/JochiRaider/repocapsule.svg?style=for-the-badge
 [contributors-url]: https://github.com/your-org/repocapsule/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/your-org/repocapsule.svg?style=for-the-badge
+[forks-shield]: https://img.shields.io/github/forks/JochiRaider/repocapsule.svg?style=for-the-badge
 [forks-url]: https://github.com/your-org/repocapsule/network/members
-[stars-shield]: https://img.shields.io/github/stars/your-org/repocapsule.svg?style=for-the-badge
+[stars-shield]: https://img.shields.io/github/stars/JochiRaider/repocapsule.svg?style=for-the-badge
 [stars-url]: https://github.com/your-org/repocapsule/stargazers
-[issues-shield]: https://img.shields.io/github/issues/your-org/repocapsule.svg?style=for-the-badge
+[issues-shield]: https://img.shields.io/github/issues/JochiRaider/repocapsule.svg?style=for-the-badge
 [issues-url]: https://github.com/your-org/repocapsule/issues
-[license-shield]: https://img.shields.io/github/license/your-org/repocapsule.svg?style=for-the-badge
+[license-shield]: https://img.shields.io/github/license/JochiRaider/repocapsule.svg?style=for-the-badge
 [license-url]: https://github.com/your-org/repocapsule/blob/main/LICENSE
 
