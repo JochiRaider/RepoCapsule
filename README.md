@@ -1,4 +1,5 @@
 <div id="top"></div>
+<div align="center">
 
 [![license](https://img.shields.io/github/license/JochiRaider/RepoCapsule?style=for-the-badge)](LICENSE)
 [![forks](https://img.shields.io/github/forks/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/network/members)
@@ -6,6 +7,7 @@
 [![stars](https://img.shields.io/github/stars/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/stargazers)
 [![issues](https://img.shields.io/github/issues/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/issues)
 
+</div>
 
 <h1 align="center">RepoCapsule</h1>
 
