@@ -1,32 +1,9 @@
 <div id="top"></div>
-
 [![license](https://img.shields.io/github/license/JochiRaider/RepoCapsule?style=for-the-badge)](LICENSE)
 [![forks](https://img.shields.io/github/forks/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/network/members)
 [![contributors](https://img.shields.io/github/contributors/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/graphs/contributors)
 [![stars](https://img.shields.io/github/stars/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/stargazers)
 [![issues](https://img.shields.io/github/issues/JochiRaider/RepoCapsule?style=for-the-badge)](https://github.com/JochiRaider/RepoCapsule/issues)
-
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="logo.png" />
-    <source media="(prefers-color-scheme: light)" srcset="logo.png" />
-    <img alt="RepoCapsule logo" src="logo.png" width="1024" height="1024" />
-  </picture>
-  <h1>RepoCapsule</h1>
-  <p>
-    Repository → JSONL converter with robust decoding, structure‑aware chunking, Markdown→KQL extraction, and GitHub streaming helpers — ideal for pre‑training corpora and RAG.
-  </p>
-  <p>
-    <a href="https://github.com/JochiRaider/repocapsule"><strong>Explore the docs »</strong></a>
-    ·
-    <a href="https://github.com/JochiRaider/repocapsule/issues">Report Bug</a>
-    ·
-    <a href="https://github.com/JochiRaider/repocapsule/issues">Request Feature</a>
-  </p>
-</div>
-<div id="top"></div>
-
 <p align="center">
   <img alt="RepoCapsule logo" src="logo.png" width="256" height="256" />
 </p>
