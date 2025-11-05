@@ -60,7 +60,7 @@ It is designed for LLM data pipelines: efficient conversion, robust Unicode deco
   - Zipball downloads are buffered to disk and iterated **without extraction**, with anti‑zip‑slip and anti‑zip‑bomb checks.
   - Guards include: absolute/parent‑traversal rejection, per‑file and total uncompressed size caps, member count caps, and compression‑ratio screening.
 - **Robust decoding**
-  - BOM‑aware UTF‑8/16/32 detection, heuristic UTF‑16 guess, `cp1252` fallback, newline/control cleanup.
+  - BOM‑aware UTF‑8/16/32 detection, heuristic UTF‑16 guess, `cp1252` fallback, Mojibake repair, newline/control cleanup.
 - **Structure‑aware chunking**
   - Markdown (ATX/Setext + fenced code) and reStructuredText (titles, directives, literal blocks).
   - Code line packer tuned for source files.
