@@ -29,10 +29,15 @@ class PipelineStats:
     sink_errors: int = 0
     source_errors: int = 0
     by_ext: Dict[str, int] = field(default_factory=dict)
+    qc_scored: int = 0
+    qc_kept: int = 0
+    qc_dropped_low_score: int = 0
+    qc_dropped_near_dup: int = 0
+    qc_errors: int = 0
 
     def as_dict(self) -> Dict[str, object]:
         # Keep a simple, stable shape for external reporting/JSONL footers.
-        return {
+        data: Dict[str, object] = {
             "files": int(self.files),
             "bytes": int(self.bytes),
             "records": int(self.records),
@@ -40,6 +45,14 @@ class PipelineStats:
             "source_errors": int(self.source_errors),
             "by_ext": dict(self.by_ext),
         }
+        data["qc"] = {
+            "scored": int(self.qc_scored),
+            "kept": int(self.qc_kept),
+            "dropped_low_score": int(self.qc_dropped_low_score),
+            "dropped_near_dup": int(self.qc_dropped_near_dup),
+            "errors": int(self.qc_errors),
+        }
+        return data
 
 
 
@@ -109,6 +122,10 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
     """Run the end-to-end pipeline described by ``config``."""
     cfg = config
     stats = PipelineStats()
+    qc_cfg = cfg.qc
+    qc_active = bool(getattr(qc_cfg, "enabled", False) and getattr(qc_cfg, "scorer", None))
+    if qc_cfg.enabled and not qc_active:
+        log.warning("QC enabled but no scorer is configured; skipping inline annotations.")
 
     with ExitStack() as stack:
         open_sources: List[Source] = [_open_source_with_stack(stack, src) for src in cfg.sources.sources]
@@ -131,6 +148,83 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
             # do NOT materialize; allow generators to stream
             return item, (recs if isinstance(recs, list) else recs)
 
+        def _merge_qc_meta(record: Dict[str, Any], qc_result: Dict[str, Any]) -> None:
+            if not isinstance(record, dict):
+                return
+            meta = record.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
+                record["meta"] = meta
+            tokens_est = qc_result.get("tokens")
+            updates = {
+                "quality_score": qc_result.get("score"),
+                "parse_ok": qc_result.get("parse_ok"),
+                "approx_tokens": tokens_est,
+                "token_count": tokens_est,
+                "repetition": qc_result.get("repetition"),
+                "ascii_ratio": qc_result.get("ascii_ratio"),
+                "code_complexity": qc_result.get("code_complexity"),
+                "gopher_quality": qc_result.get("gopher_quality"),
+                "gopher_flags": qc_result.get("gopher_flags"),
+                "near_dup": qc_result.get("near_dup"),
+                "near_dup_minhash": qc_result.get("near_dup_minhash"),
+                "near_dup_simhash": qc_result.get("near_dup_simhash"),
+                "minhash_jaccard": qc_result.get("minhash_jaccard"),
+                "perplexity": qc_result.get("perplexity"),
+            }
+            for key, value in updates.items():
+                if value is None:
+                    continue
+                meta[key] = value
+            dup_id = qc_result.get("minhash_dup_of") or qc_result.get("simhash_dup_of")
+            if dup_id and "dup_family_id" not in meta:
+                meta["dup_family_id"] = dup_id
+
+        def _score_and_gate_record(record: Dict[str, Any]) -> bool:
+            if not qc_active:
+                return True
+            scorer = qc_cfg.scorer
+            if scorer is None:
+                return True
+            meta = record.get("meta") if isinstance(record, dict) else None
+            path = (meta.get("path") if isinstance(meta, dict) else None) or record.get("path") or "<unknown>"
+            try:
+                qc_result = scorer.score_record(record)
+            except Exception as exc:  # pragma: no cover - depends on scorer internals
+                stats.qc_errors += 1
+                if qc_cfg.fail_on_error:
+                    raise
+                log.warning("QC scoring failed for %s: %s", path, exc)
+                return True
+            stats.qc_scored += 1
+            _merge_qc_meta(record, qc_result)
+            drop_reason: Optional[str] = None
+            score_value = qc_result.get("score")
+            min_score = qc_cfg.min_score
+            if min_score is not None and score_value is not None and float(score_value) < float(min_score):
+                drop_reason = "low_score"
+            if drop_reason is None and qc_cfg.drop_near_dups and qc_result.get("near_dup"):
+                drop_reason = "near_dup"
+            if drop_reason == "low_score":
+                stats.qc_dropped_low_score += 1
+                log.debug(
+                    "Dropping %s: quality_score %.2f < %.2f",
+                    path,
+                    float(score_value or 0.0),
+                    float(min_score or 0.0),
+                )
+                return False
+            if drop_reason == "near_dup":
+                stats.qc_dropped_near_dup += 1
+                log.debug(
+                    "Dropping %s: near duplicate (minhash_jaccard=%.4f)",
+                    path,
+                    float(qc_result.get("minhash_jaccard") or 0.0),
+                )
+                return False
+            stats.qc_kept += 1
+            return True
+
         def _increment_file_stats(item: Any) -> None:
             size = getattr(item, "size", None)
             if size is None:
@@ -143,6 +237,8 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
 
         def _write_records(item: Any, recs: Iterable[Record]) -> None:
             for record in recs:
+                if not _score_and_gate_record(record):
+                    continue
                 wrote_any = False
                 for sink in open_sinks:
                     try:
@@ -188,7 +284,7 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
             with ThreadPoolExecutor(max_workers=cfg.pipeline.max_workers) as pool:
                 pending: List[Future[Tuple[Any, Iterable[Record]]]] = []
 
-                def _drain(block: bool = False) -> List[Tuple[Any, List[Record]]]:
+                def _drain(block: bool = False) -> List[Tuple[Any, Iterable[Record]]]:
                     nonlocal pending
                     if not pending:
                         return []
@@ -198,7 +294,7 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
                         return_when=FIRST_COMPLETED,
                     )
                     pending = list(still)
-                    results: List[Tuple[Any, List[Record]]] = []
+                    results: List[Tuple[Any, Iterable[Record]]] = []
                     for fut in done:
                         try:
                             results.append(fut.result())
@@ -225,6 +321,26 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
                 while pending:
                     for _item, recs in _drain(block=True):
                         _write_records(_item, recs)
+
+    if qc_cfg.enabled:
+        min_score_str = (
+            f"{qc_cfg.min_score:.1f}" if qc_cfg.min_score is not None else "off"
+        )
+        log.info(
+            "QC summary (min_score=%s, drop_near_dups=%s)\n"
+            "  scored: %d\n"
+            "  kept: %d\n"
+            "  dropped_low_score: %d\n"
+            "  dropped_near_dup: %d\n"
+            "  errors: %d",
+            min_score_str,
+            "on" if qc_cfg.drop_near_dups else "off",
+            stats.qc_scored,
+            stats.qc_kept,
+            stats.qc_dropped_low_score,
+            stats.qc_dropped_near_dup,
+            stats.qc_errors,
+        )
 
     return stats.as_dict()
 

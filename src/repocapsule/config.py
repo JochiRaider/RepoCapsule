@@ -130,6 +130,8 @@ class QCConfig:
     csv_suffix: str = "_quality.csv"
     scorer: Optional[Any] = None  # optional extra
     fail_on_error: bool = False
+    min_score: Optional[float] = 60.0
+    drop_near_dups: bool = False
 
 
 @dataclass(slots=True)

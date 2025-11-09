@@ -20,9 +20,10 @@ from .sources.local import LocalDirSource
 from .sources.github_zip import GitHubZipSource
 
 try:  # optional extra
-    from .qc import JSONLQualityScorer
+    from .qc import JSONLQualityScorer, score_jsonl_to_csv
 except Exception:  # pragma: no cover - qc extras not installed
     JSONLQualityScorer = None  # type: ignore[assignment]
+    score_jsonl_to_csv = None  # type: ignore[assignment]
 
 log = get_logger(__name__)
 
@@ -45,24 +46,23 @@ def convert(config: RepocapsuleConfig) -> Dict[str, int]:
     if config.qc.enabled:
         if JSONLQualityScorer is None:
             raise RuntimeError("QC extras are not installed; disable config.qc.enabled or install optional dependencies.")
-        jsonl_path = config.sinks.primary_jsonl_name or config.metadata.get("primary_jsonl")
-        if jsonl_path:
-            scorer = config.qc.scorer or JSONLQualityScorer()
-            config.qc.scorer = scorer
-            rows = scorer.score_jsonl_path(jsonl_path)
-            if config.qc.write_csv:
-                # use library-level helper if present; fall back to a tiny local writer
+        if config.qc.write_csv:
+            if score_jsonl_to_csv is None:
+                raise RuntimeError("score_jsonl_to_csv helper is unavailable; reinstall QC extras.")
+            jsonl_path = config.sinks.primary_jsonl_name or config.metadata.get("primary_jsonl")
+            if jsonl_path:
                 suffix = config.qc.csv_suffix or "_quality.csv"
-                try:
-                    from .qc import score_jsonl_to_csv  # optional extra
-                    score_jsonl_to_csv(jsonl_path, jsonl_path.replace(".jsonl", suffix))
-                except Exception:
-                    import csv
-                    out_csv = jsonl_path.replace(".jsonl", suffix)
-                    with open(out_csv, "w", newline="", encoding="utf-8") as f:
-                        w = csv.DictWriter(f, fieldnames=sorted({k for r in rows for k in r}))
-                        w.writeheader()
-                        w.writerows(rows)
+                out_csv: Optional[str]
+                if suffix:
+                    if str(jsonl_path).endswith(".jsonl"):
+                        out_csv = str(jsonl_path)[: -len(".jsonl")] + suffix
+                    else:
+                        out_csv = str(jsonl_path) + suffix
+                else:
+                    out_csv = None
+                if out_csv is None:
+                    out_csv = (str(jsonl_path)[:-7] if str(jsonl_path).endswith(".jsonl") else str(jsonl_path)) + "_quality.csv"
+                score_jsonl_to_csv(str(jsonl_path), out_csv)
     return stats
 
 
