@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence, Tuple, Any
 
 from .chunk import ChunkPolicy
 from .convert import get_default_bytes_handlers, Sniff, BytesHandler
