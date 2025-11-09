@@ -230,9 +230,9 @@ def build_record(
         }
         lang = overrides.get(Path(rp).suffix.lower().lstrip("."), lang)
 
-    # Compute byte length and token estimate
+    # Compute byte length and token estimate (approximate by default)
     bcount = len(text.encode("utf-8", "strict"))
-    token_count = tokens if tokens is not None else count_tokens(text, None, "code" if kind == "code" else "doc")
+    approx_tokens = tokens if tokens is not None else count_tokens(text, None, "code" if kind == "code" else "doc")
 
     record = {
         "text": text,
@@ -247,7 +247,8 @@ def build_record(
             "encoding": encoding,
             "had_replacement": bool(had_replacement),
             "sha256": sha256_text(text),
-            "tokens": token_count,
+            "tokens": approx_tokens,  # retained for backward compatibility (approximate)
+            "approx_tokens": approx_tokens,
             "bytes": bcount,
         },
     }

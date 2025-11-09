@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List
+import json
 import os
 import re
 
@@ -18,12 +19,14 @@ from .log import get_logger
 from .naming import build_output_basename_github, build_output_basename_pdf
 from .sources.local import LocalDirSource
 from .sources.github_zip import GitHubZipSource
+from .qc_utils import update_dup_family_counts, top_dup_families
 
 try:  # optional extra
-    from .qc import JSONLQualityScorer, score_jsonl_to_csv
+    from .qc import JSONLQualityScorer, score_jsonl_to_csv, write_csv
 except Exception:  # pragma: no cover - qc extras not installed
     JSONLQualityScorer = None  # type: ignore[assignment]
     score_jsonl_to_csv = None  # type: ignore[assignment]
+    write_csv = None  # type: ignore[assignment]
 
 log = get_logger(__name__)
 
@@ -43,27 +46,129 @@ def convert(config: RepocapsuleConfig) -> Dict[str, int]:
     stats = run_pipeline(config=config)
     log.info("convert complete: %s", stats)
 
+    jsonl_path = config.sinks.primary_jsonl_name or config.metadata.get("primary_jsonl")
+    qc_summary: Optional[Dict[str, Any]] = None
+
     if config.qc.enabled:
         if JSONLQualityScorer is None:
             raise RuntimeError("QC extras are not installed; disable config.qc.enabled or install optional dependencies.")
-        if config.qc.write_csv:
+        mode = config.qc.mode
+        if mode == "inline":
+            qc_summary = dict(stats.get("qc") or {})
+        else:
+            qc_summary = _run_post_qc(jsonl_path, config.qc)
+            stats["qc"] = qc_summary
+
+        if config.qc.write_csv and mode == "inline":
             if score_jsonl_to_csv is None:
                 raise RuntimeError("score_jsonl_to_csv helper is unavailable; reinstall QC extras.")
-            jsonl_path = config.sinks.primary_jsonl_name or config.metadata.get("primary_jsonl")
-            if jsonl_path:
-                suffix = config.qc.csv_suffix or "_quality.csv"
-                out_csv: Optional[str]
-                if suffix:
-                    if str(jsonl_path).endswith(".jsonl"):
-                        out_csv = str(jsonl_path)[: -len(".jsonl")] + suffix
-                    else:
-                        out_csv = str(jsonl_path) + suffix
-                else:
-                    out_csv = None
-                if out_csv is None:
-                    out_csv = (str(jsonl_path)[:-7] if str(jsonl_path).endswith(".jsonl") else str(jsonl_path)) + "_quality.csv"
+            out_csv = _derive_csv_path(jsonl_path, config.qc.csv_suffix)
+            if out_csv:
                 score_jsonl_to_csv(str(jsonl_path), out_csv)
+
+    if qc_summary and jsonl_path:
+        _append_qc_summary(jsonl_path, qc_summary)
     return stats
+
+
+def _run_post_qc(jsonl_path: Optional[str], qc_cfg) -> Dict[str, Any]:
+    if not jsonl_path:
+        raise RuntimeError("Cannot run post-QC summary without a primary JSONL path")
+    scorer = qc_cfg.scorer or (JSONLQualityScorer() if JSONLQualityScorer is not None else None)
+    if scorer is None:
+        raise RuntimeError("QC extras are not installed; disable QC or install optional dependencies.")
+    rows = scorer.score_jsonl_path(str(jsonl_path))
+    summary = _summarize_qc_rows(rows, qc_cfg)
+    if qc_cfg.write_csv:
+        out_csv = _derive_csv_path(jsonl_path, qc_cfg.csv_suffix)
+        if out_csv:
+            if write_csv is not None:
+                write_csv(rows, out_csv)
+            elif score_jsonl_to_csv is not None:
+                score_jsonl_to_csv(str(jsonl_path), out_csv)
+            else:
+                raise RuntimeError("QC CSV helpers unavailable; reinstall optional dependencies.")
+    _log_post_qc_summary(summary)
+    return summary
+
+
+def _summarize_qc_rows(rows: List[Dict[str, Any]], qc_cfg) -> Dict[str, Any]:
+    storage: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        family_id = row.get("dup_family_id") or row.get("doc_id")
+        update_dup_family_counts(storage, family_id, row.get("path"))
+    min_score = qc_cfg.min_score
+    low_candidates = 0
+    near_dup_candidates = 0
+    for row in rows:
+        score_val = row.get("score")
+        if min_score is not None and score_val is not None and float(score_val) < float(min_score):
+            low_candidates += 1
+        if qc_cfg.drop_near_dups and row.get("near_dup"):
+            near_dup_candidates += 1
+    summary: Dict[str, Any] = {
+        "enabled": True,
+        "mode": qc_cfg.mode,
+        "scored": len(rows),
+        "kept": len(rows),
+        "dropped_low_score": 0,
+        "dropped_near_dup": 0,
+        "errors": 0,
+        "candidates_low_score": low_candidates,
+        "candidates_near_dup": near_dup_candidates,
+        "top_dup_families": top_dup_families(storage),
+    }
+    return summary
+
+
+def _derive_csv_path(jsonl_path: Optional[str], suffix: Optional[str]) -> Optional[str]:
+    if not jsonl_path:
+        return None
+    suffix = suffix or "_quality.csv"
+    base = str(jsonl_path)
+    if base.endswith(".jsonl"):
+        base = base[:-6]  # remove '.jsonl'
+    return base + suffix
+
+
+def _build_qc_summary_record(summary: Dict[str, Any]) -> Dict[str, Any]:
+    summary = dict(summary)
+    summary.setdefault("mode", "inline")
+    return {
+        "text": "",
+        "meta": {
+            "kind": "qc_summary",
+            "mode": summary.get("mode"),
+            "source": "repocapsule",
+        },
+        "qc": summary,
+    }
+
+
+def _append_qc_summary(jsonl_path: str, summary: Dict[str, Any]) -> None:
+    record = _build_qc_summary_record(summary)
+    with open(jsonl_path, "a", encoding="utf-8") as fp:
+        fp.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        fp.write("\n")
+
+
+def _log_post_qc_summary(summary: Dict[str, Any]) -> None:
+    log.info(
+        "Post-QC summary (mode=%s, scored=%d, candidates_low_score=%d, candidates_near_dup=%d)",
+        summary.get("mode"),
+        summary.get("scored"),
+        summary.get("candidates_low_score"),
+        summary.get("candidates_near_dup"),
+    )
+    top = summary.get("top_dup_families") or []
+    if top:
+        lines = [
+            f"    - {entry['dup_family_id']}: count={entry['count']} examples={entry.get('examples', [])}"
+            for entry in top
+        ]
+        log.info("Largest duplicate families (post-QC):\n%s", "\n".join(lines))
+    else:
+        log.info("Largest duplicate families (post-QC): none")
 
 
 # ---------- Path helpers (ergonomic, non-breaking) ----------

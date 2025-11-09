@@ -7,7 +7,7 @@ from typing import Iterable, Dict, Any, Generator, Optional
 from collections import deque
 import random
 
-__all__ = ['JSONLQualityScorer','score_jsonl_to_csv']
+__all__ = ['JSONLQualityScorer','score_jsonl_to_csv', 'write_csv']
 
 
 # ---------- Optional deps (silently degrade if missing) ----------
@@ -388,13 +388,14 @@ class JSONLQualityScorer:
         self.enable_gopher = bool(enable_gopher)
         self.gopher_weight = float(gopher_weight)
         # Compare to a recent window only (avoids book-wide self-similarity)
-        self.sim_seen = deque(maxlen=128)  
+        self.sim_seen: deque[tuple[int, str]] = deque(maxlen=128)  
 
     def score_record(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         text = rec.get("text", "")
         meta = rec.get("meta", {})
         lang = (meta.get("lang") or "").strip() or "Text"
         lang_l = lang.lower()
+        doc_id = str(meta.get("sha256") or hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest())
 
         N = int(meta.get("tokens") or approx_tokens(text))
         Tlo, Thi = target_band(lang_l)
@@ -406,20 +407,24 @@ class JSONLQualityScorer:
         p_ok = parse_ok(text, lang)
 
         sh = simhash64(text)
-        # compute min Hamming distance within the window
-        ham_min = min((hamming(sh, h) for h in self.sim_seen), default=None)
-        near_dup_sim = any(hamming(sh, h) < self.sim_thresh for h in self.sim_seen)        
-        
-        # windowed memory
-        self.sim_seen.append(sh)
+        ham_min: Optional[int] = None
+        sim_dup_of: Optional[str] = None
+        for other_hash, other_id in self.sim_seen:
+            dist = hamming(sh, other_hash)
+            if ham_min is None or dist < ham_min:
+                ham_min = dist
+                sim_dup_of = other_id
+        near_dup_sim = ham_min is not None and ham_min < self.sim_thresh
+        self.sim_seen.append((sh, doc_id))
 
         # MinHash/LSH near-dup
         near_dup_mh, mh_j, mh_of = False, 0.0, None
         if self.enable_minhash and self.lsh is not None:
             # prefer meta sha256 if present; else quick hash of text
-            doc_id = (meta.get("sha256") or hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest())
             sig = _minhash_signature(_shingle_hashes(text, k=self.minhash_k), n_perm=self.lsh.n_perm)
             near_dup_mh, mh_j, mh_of = self.lsh.add_and_check(doc_id, sig)
+        else:
+            mh_of = None
 
         ppl = None
         lm_score = 0.5
@@ -444,6 +449,9 @@ class JSONLQualityScorer:
             0.15*lm_score
         )
         score = base + (self.gopher_weight * goph_score if self.enable_gopher and self.gopher_weight > 0 else 0.0)
+        minhash_dup_of = mh_of if (self.enable_minhash and near_dup_mh and mh_of) else None
+        simhash_dup_of = sim_dup_of if near_dup_sim else None
+        dup_family_id = minhash_dup_of or simhash_dup_of or doc_id
         near_dup = (near_dup_sim or near_dup_mh)
 
         if near_dup:
@@ -465,7 +473,9 @@ class JSONLQualityScorer:
             "near_dup_simhash": bool(near_dup_sim),
             "near_dup_minhash": bool(near_dup_mh),
             "minhash_jaccard": round(float(mh_j), 4) if mh_j else 0.0,
-            "minhash_dup_of": mh_of,
+            "minhash_dup_of": minhash_dup_of,
+            "simhash_dup_of": simhash_dup_of,
+            "dup_family_id": dup_family_id,
             "gopher_quality": round(float(goph_score), 4),
             "gopher_flags": goph_flags,            
             "hamdist": None if ham_min is None else int(ham_min),
@@ -475,6 +485,7 @@ class JSONLQualityScorer:
             "chunk_id": meta.get("chunk_id"),
             "n_chunks": meta.get("n_chunks"),
             "repo": meta.get("repo"),
+            "doc_id": doc_id,
         }
 
     def score_jsonl_path(self, jsonl_path: str) -> list[Dict[str, Any]]:
@@ -487,6 +498,9 @@ class JSONLQualityScorer:
                 try:
                     rec = json.loads(line)
                 except Exception:
+                    continue
+                meta = rec.get("meta") if isinstance(rec, dict) else None
+                if isinstance(meta, dict) and meta.get("kind") == "qc_summary":
                     continue
                 try:
                     rows.append(self.score_record(rec))

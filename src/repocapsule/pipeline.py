@@ -13,6 +13,7 @@ from .config import RepocapsuleConfig
 from .interfaces import Source, Sink, RepoContext, Record
 from .convert import make_records_from_bytes
 from .log import get_logger
+from .qc_utils import update_dup_family_counts, top_dup_families
 
 
 log = get_logger(__name__)
@@ -34,6 +35,9 @@ class PipelineStats:
     qc_dropped_low_score: int = 0
     qc_dropped_near_dup: int = 0
     qc_errors: int = 0
+    qc_enabled: bool = False
+    qc_mode: str = "inline"
+    qc_dup_families: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, object]:
         # Keep a simple, stable shape for external reporting/JSONL footers.
@@ -46,13 +50,22 @@ class PipelineStats:
             "by_ext": dict(self.by_ext),
         }
         data["qc"] = {
+            "enabled": bool(self.qc_enabled),
+            "mode": self.qc_mode,
             "scored": int(self.qc_scored),
             "kept": int(self.qc_kept),
             "dropped_low_score": int(self.qc_dropped_low_score),
             "dropped_near_dup": int(self.qc_dropped_near_dup),
             "errors": int(self.qc_errors),
+            "top_dup_families": top_dup_families(self.qc_dup_families),
         }
         return data
+
+    def record_dup_family(self, family_id: Optional[str], path: Optional[str]) -> None:
+        update_dup_family_counts(self.qc_dup_families, family_id, path)
+
+    def qc_top_dup_families(self) -> List[Dict[str, Any]]:
+        return top_dup_families(self.qc_dup_families)
 
 
 
@@ -123,7 +136,9 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
     cfg = config
     stats = PipelineStats()
     qc_cfg = cfg.qc
-    qc_active = bool(getattr(qc_cfg, "enabled", False) and getattr(qc_cfg, "scorer", None))
+    stats.qc_enabled = bool(qc_cfg.enabled)
+    stats.qc_mode = qc_cfg.mode
+    qc_active = bool(qc_cfg.enabled and qc_cfg.mode == "inline" and getattr(qc_cfg, "scorer", None))
     if qc_cfg.enabled and not qc_active:
         log.warning("QC enabled but no scorer is configured; skipping inline annotations.")
 
@@ -156,11 +171,12 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
                 meta = {}
                 record["meta"] = meta
             tokens_est = qc_result.get("tokens")
+            if tokens_est is not None:
+                meta["approx_tokens"] = tokens_est
+                meta.setdefault("tokens", tokens_est)
             updates = {
                 "quality_score": qc_result.get("score"),
                 "parse_ok": qc_result.get("parse_ok"),
-                "approx_tokens": tokens_est,
-                "token_count": tokens_est,
                 "repetition": qc_result.get("repetition"),
                 "ascii_ratio": qc_result.get("ascii_ratio"),
                 "code_complexity": qc_result.get("code_complexity"),
@@ -170,15 +186,15 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
                 "near_dup_minhash": qc_result.get("near_dup_minhash"),
                 "near_dup_simhash": qc_result.get("near_dup_simhash"),
                 "minhash_jaccard": qc_result.get("minhash_jaccard"),
+                "minhash_dup_of": qc_result.get("minhash_dup_of"),
+                "simhash_dup_of": qc_result.get("simhash_dup_of"),
+                "dup_family_id": qc_result.get("dup_family_id"),
                 "perplexity": qc_result.get("perplexity"),
             }
             for key, value in updates.items():
                 if value is None:
                     continue
                 meta[key] = value
-            dup_id = qc_result.get("minhash_dup_of") or qc_result.get("simhash_dup_of")
-            if dup_id and "dup_family_id" not in meta:
-                meta["dup_family_id"] = dup_id
 
         def _score_and_gate_record(record: Dict[str, Any]) -> bool:
             if not qc_active:
@@ -198,6 +214,12 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
                 return True
             stats.qc_scored += 1
             _merge_qc_meta(record, qc_result)
+            meta_after = record.get("meta") if isinstance(record, dict) else None
+            path_for_dup = (meta_after.get("path") if isinstance(meta_after, dict) else None) or path
+            family_id = qc_result.get("dup_family_id")
+            if isinstance(meta_after, dict):
+                family_id = meta_after.get("dup_family_id", family_id)
+            stats.record_dup_family(family_id, path_for_dup)
             drop_reason: Optional[str] = None
             score_value = qc_result.get("score")
             min_score = qc_cfg.min_score
@@ -341,6 +363,15 @@ def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
             stats.qc_dropped_near_dup,
             stats.qc_errors,
         )
+        top = stats.qc_top_dup_families()
+        if top:
+            lines = [
+                f"    - {entry['dup_family_id']}: count={entry['count']} examples={entry.get('examples', [])}"
+                for entry in top
+            ]
+            log.info("Largest duplicate families:\n%s", "\n".join(lines))
+        else:
+            log.info("Largest duplicate families: none")
 
     return stats.as_dict()
 

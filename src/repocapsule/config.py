@@ -132,6 +132,7 @@ class QCConfig:
     fail_on_error: bool = False
     min_score: Optional[float] = 60.0
     drop_near_dups: bool = False
+    mode: str = "inline"  # "inline" or "post"
 
 
 @dataclass(slots=True)
@@ -178,6 +179,10 @@ class RepocapsuleConfig:
             self.qc.scorer = JSONLQualityScorer()
         if self.qc.enabled and self.qc.scorer is None and JSONLQualityScorer is None:
             raise RuntimeError("QC extras not installed; disable QC or install optional deps.")
+        mode = (self.qc.mode or "inline").lower()
+        if mode not in {"inline", "post"}:
+            raise ValueError(f"Invalid qc.mode {self.qc.mode!r}; expected 'inline' or 'post'")
+        self.qc.mode = mode
 
 
 __all__ = ["RepocapsuleConfig"]

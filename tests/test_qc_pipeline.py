@@ -47,8 +47,11 @@ def _make_qc_result(
     score: float,
     near_dup: bool = False,
     dup_id: str | None = None,
+    doc_id: str = "doc",
 ) -> Dict[str, Any]:
+    family_id = dup_id or doc_id
     return {
+        "doc_id": doc_id,
         "score": score,
         "tokens": 42,
         "len": 100,
@@ -62,7 +65,9 @@ def _make_qc_result(
         "near_dup_minhash": near_dup,
         "near_dup_simhash": near_dup,
         "minhash_jaccard": 0.9 if near_dup else 0.0,
-        "minhash_dup_of": dup_id,
+        "minhash_dup_of": dup_id if near_dup else None,
+        "simhash_dup_of": dup_id if near_dup else None,
+        "dup_family_id": family_id,
         "perplexity": None,
     }
 
@@ -74,6 +79,7 @@ def _build_config(
     *,
     min_score: float | None = 60.0,
     drop_near_dups: bool = False,
+    mode: str = "inline",
 ) -> RepocapsuleConfig:
     cfg = RepocapsuleConfig()
     cfg.sources = replace(cfg.sources, sources=(source,))
@@ -82,6 +88,7 @@ def _build_config(
     cfg.qc.write_csv = False
     cfg.qc.min_score = min_score
     cfg.qc.drop_near_dups = drop_near_dups
+    cfg.qc.mode = mode
     cfg.qc.scorer = scorer  # inject fake scorer before prepare()
     cfg.prepare()
     return cfg
@@ -95,7 +102,7 @@ def _make_file(path: str, text: str) -> FileItem:
 def test_qc_annotations_added_to_records():
     source = StaticSource([_make_file("doc.txt", "hello world")])
     sink = RecordingSink()
-    scorer = FakeScorer([_make_qc_result(score=88.5, near_dup=False, dup_id="fam-1")])
+    scorer = FakeScorer([_make_qc_result(score=88.5, near_dup=False, dup_id="fam-1", doc_id="fam-1")])
     cfg = _build_config(source, sink, scorer, min_score=50.0)
 
     stats = run_pipeline(config=cfg)
@@ -107,6 +114,7 @@ def test_qc_annotations_added_to_records():
     assert meta["approx_tokens"] == 42
     assert meta["dup_family_id"] == "fam-1"
     assert meta["near_dup"] is False
+    assert "token_count" not in meta
 
 
 def test_qc_drops_low_score_records():
@@ -141,3 +149,38 @@ def test_qc_drops_near_dups_when_enabled():
     assert stats["qc"]["kept"] == 1
     assert len(sink.records) == 1
     assert sink.records[0]["meta"]["path"] == "a.txt"
+
+
+def test_qc_top_duplicate_families_reported():
+    source = StaticSource([
+        _make_file("a.txt", "alpha"),
+        _make_file("b.txt", "beta"),
+        _make_file("c.txt", "gamma"),
+    ])
+    sink = RecordingSink()
+    scorer = FakeScorer([
+        _make_qc_result(score=90.0, near_dup=False, doc_id="fam-dup"),
+        _make_qc_result(score=80.0, near_dup=True, dup_id="fam-dup"),
+        _make_qc_result(score=70.0, near_dup=True, dup_id="fam-dup"),
+    ])
+    cfg = _build_config(source, sink, scorer, min_score=None, drop_near_dups=False)
+
+    stats = run_pipeline(config=cfg)
+
+    top = stats["qc"]["top_dup_families"]
+    assert top[0]["dup_family_id"] == "fam-dup"
+    assert top[0]["count"] == 3
+
+
+def test_post_mode_skips_inline_scoring():
+    source = StaticSource([_make_file("doc.txt", "hello")])
+    sink = RecordingSink()
+    # scorer won't be used inline since mode=post, but provide placeholder to satisfy config
+    scorer = FakeScorer([_make_qc_result(score=80.0)])
+    cfg = _build_config(source, sink, scorer, mode="post")
+
+    stats = run_pipeline(config=cfg)
+
+    assert stats["qc"]["mode"] == "post"
+    assert stats["qc"]["scored"] == 0
+    assert len(sink.records) == 1

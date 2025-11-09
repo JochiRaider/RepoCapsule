@@ -71,6 +71,7 @@ from .records import (
 
 # Converters
 from .convert import make_records_for_file, make_records_from_bytes
+from .export import annotate_exact_token_counts
 
 # Web PDF sources
 from .sources_webpdf import WebPdfListSource, WebPagePdfSource
@@ -99,19 +100,24 @@ __all__ = [
     # log
     "get_logger", "configure_logging", "temp_level",
     # fs
-    "DEFAULT_SKIP_DIRS", "DEFAULT_SKIP_FILES", "GitignoreRule", "GitignoreMatcher", "iter_repo_files", "collect_repo_files",
+    "DEFAULT_SKIP_DIRS", "DEFAULT_SKIP_FILES", "GitignoreRule", 
+    "GitignoreMatcher", "iter_repo_files", "collect_repo_files",
     # decode
     "read_text", "decode_bytes",
     # chunk
     "Block", "ChunkPolicy", "count_tokens", "split_doc_blocks", "chunk_text","register_doc_splitter",
     # md_kql
-    "KQLBlock", "extract_kql_blocks_from_markdown", "is_probable_kql", "guess_kql_tables", "derive_category_from_rel",
+    "KQLBlock", "extract_kql_blocks_from_markdown", "is_probable_kql", 
+    "guess_kql_tables", "derive_category_from_rel",
     # github
-    "RepoSpec", "parse_github_url", "github_api_get", "get_repo_info", "get_repo_license_spdx", "download_zipball_to_temp", "iter_zip_members", 
+    "RepoSpec", "parse_github_url", "github_api_get", "get_repo_info", 
+    "get_repo_license_spdx", "download_zipball_to_temp", "iter_zip_members", 
     # records
-    "CODE_EXTS", "DOC_EXTS", "EXT_LANG", "guess_lang_from_path", "is_code_file", "sha256_text", "build_record",
+    "CODE_EXTS", "DOC_EXTS", "EXT_LANG", "guess_lang_from_path", "is_code_file",
+    "sha256_text", "build_record",
     # convert
     "make_records_for_file", "make_records_from_bytes", 
+    "annotate_exact_token_counts",
     # web sources
     "WebPdfListSource", "WebPagePdfSource",  
     # runner / sinks
