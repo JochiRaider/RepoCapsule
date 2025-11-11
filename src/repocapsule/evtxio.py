@@ -139,14 +139,11 @@ def _event_json_with_raw(xml_text: str) -> str:
 
 def _recover_with_evtxtract(data: bytes) -> Iterable[str]:
     """
-    Best-effort recovery that shells out to EVTXtract if available
-    and REPOCAPSULE_EVTX_RECOVER=1.
+    Best-effort recovery that shells out to EVTXtract if available.
 
-    Returns an iterator of XML fragments (strings). If EVTXtract isn't
-    installed or fails, yields nothing.
+    Returns XML fragments (strings). If EVTXtract isn't installed or fails,
+    yields nothing.
     """
-    if os.getenv("REPOCAPSULE_EVTX_RECOVER", "").strip() not in ("1", "true", "True"):
-        return ()
     # Resolve binary (either "evtxtract" or "python -m evtxtract")
     candidates = [["evtxtract"], ["python", "-m", "evtxtract"], ["python3", "-m", "evtxtract"]]
     with tempfile.NamedTemporaryFile(prefix="rc_evtx_", suffix=".bin", delete=True) as tf:
@@ -172,19 +169,29 @@ def _recover_with_evtxtract(data: bytes) -> Iterable[str]:
 
 # --- Public handler -----------------------------------------------------------
 
+def _env_wants_recovery() -> bool:
+    return os.getenv("REPOCAPSULE_EVTX_RECOVER", "").strip().lower() in {"1", "true", "yes"}
+
+
 def handle_evtx(
     data: bytes,
     rel: str,
     ctx: Optional[RepoContext],
     policy: Optional[ChunkPolicy],
+    *,
+    allow_recovery: Optional[bool] = None,
 ) -> Iterable[Record]:
     """
     Stream one JSONL record per event.
 
     Normal path: python-evtx -> record.xml() -> normalize to JSON (plus raw_xml).
-    Fallback (optional): if primary parsing yields zero events or raises, attempt
-    EVTXtract recovery when REPOCAPSULE_EVTX_RECOVER=1.
+    Optional fallback: pass allow_recovery=True (or set REPOCAPSULE_EVTX_RECOVER=1)
+    to try EVTXtract recovery when python-evtx fails or yields zero events.
     """
+    use_recovery = allow_recovery
+    if use_recovery is None:
+        use_recovery = _env_wants_recovery()
+
     # Primary parse
     parsed_any = False
     try:
@@ -217,7 +224,7 @@ def handle_evtx(
         parsed_any = False
 
     # Recovery path
-    if not parsed_any:
+    if not parsed_any and use_recovery:
         for xml_text in _recover_with_evtxtract(data):
             j = _parse_event_xml(xml_text)
             yield build_record(
