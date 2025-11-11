@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import safe_http
 from .interfaces import FileItem, RepoContext, Source
-from .githubio import parse_github_url, download_zipball_to_temp, iter_zip_members
+from .licenses import detect_license_in_zip, apply_license_to_context
 from .log import get_logger
 
 __all__ = [
@@ -418,6 +418,10 @@ class GitHubZipSource(Source):
             self._zip_path = download_zipball_to_temp(self.spec)
         else:
             self._zip_path = download_zipball_to_temp(self.spec, timeout=self._download_timeout)
+        if self._zip_path:
+            license_id, meta = detect_license_in_zip(self._zip_path, self._subpath)
+            if license_id and (self.context is None or not self.context.license_id):
+                self.context = apply_license_to_context(self.context, license_id, meta)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

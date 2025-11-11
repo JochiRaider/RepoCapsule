@@ -7,12 +7,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Iterable
 
 import logging
 
-
 from .config import RepocapsuleConfig
 from .chunk import ChunkPolicy, chunk_text
-from .records import build_record
 from .decode import decode_bytes
+from .factories import UnsupportedBinary
 from .interfaces import RepoContext, Record
+from .records import build_record
 
 __all__ = [
     "make_records_for_file",
@@ -21,59 +21,11 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-class UnsupportedBinary(Exception):
-    """Signal that a recognized binary format is unsupported in this build (missing extras)."""
-    pass
-
-
-# --- Built-in PDF handler (fallback when extras missing) ---
-def _fallback_sniff_pdf(data: bytes, rel: str) -> bool:
-    return rel.lower().endswith(".pdf") or data.startswith(b"%PDF-")
-
-def _fallback_handle_pdf(
-    data: bytes,
-    rel: str,
-    ctx: Optional[RepoContext],
-    policy: Optional[ChunkPolicy],
-) -> Optional[Iterable[Record]]:
-    raise UnsupportedBinary("pdf")
-
-# --- Bytes-handler plugin definitions ---
 Sniff = Callable[[bytes, str], bool]
 BytesHandler = Callable[
     [bytes, str, Optional[RepoContext], Optional[ChunkPolicy]],
     Optional[Iterable[Record]],
 ]
-
-# Fallbacks in case the extra is missing (keep sniff cheap; raise on handle)
-def _fallback_sniff_evtx(data: bytes, rel: str) -> bool:
-    # light sniff = .evtx OR 'ElfFile' OR 'ElfChnk' early in the file
-    if rel.lower().endswith(".evtx"):
-        return True
-    if data.startswith(b"ElfFile"):
-        return True
-    if b"ElfChnk" in data[:1_048_576]:  # first ~1MiB
-        return True
-    return False
-
-def _fallback_handle_evtx(data, rel, ctx, policy):
-    raise UnsupportedBinary("evtx")
-
-def get_default_bytes_handlers() -> List[Tuple[Sniff, BytesHandler]]:
-    """Return built-in handlers if their optional dependencies are met."""
-    try:
-        from .pdfio import sniff_pdf, handle_pdf  # type: ignore-import
-    except Exception:
-        sniff_pdf, handle_pdf = _fallback_sniff_pdf, _fallback_handle_pdf
-
-    try:
-        from .evtxio import sniff_evtx, handle_evtx
-    except Exception:
-        sniff_evtx, handle_evtx = _fallback_sniff_evtx, _fallback_handle_evtx
-    return [
-            (sniff_pdf, handle_pdf),
-            (sniff_evtx, handle_evtx),
-        ]
 
 # ---------------------------------------------------------------------------
 # Record creation for a single file 

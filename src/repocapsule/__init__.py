@@ -89,6 +89,7 @@ from .runner import (
 
 from .sinks import JSONLSink, PromptTextSink, NoopSink
 from .evtxio import handle_evtx,sniff_evtx
+from .licenses import detect_license_in_tree, detect_license_in_zip
 from .pipeline import run_pipeline, PipelineStats
 from .interfaces import FileItem, RepoContext, Source, Sink, Extractor
 from .config import RepocapsuleConfig
@@ -132,6 +133,8 @@ __all__ = [
     "build_output_basename", "build_output_basename_github", "build_output_basename_pdf",
     # Windows Event Logs
     "handle_evtx","sniff_evtx",
+    # License helpers
+    "detect_license_in_zip","detect_license_in_tree",
 ]
 # Optional: QC Check (depends on torch, transformers, tiktoken, pyyaml); expose if available
 try:

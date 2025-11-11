@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from .chunk import ChunkPolicy
+from .factories import make_bytes_handlers, make_http_client, make_qc_scorer
 from .interfaces import Extractor, RepoContext, Source, Record
 from .log import configure_logging
 from .safe_http import SafeHttpClient, set_global_http_client
@@ -17,15 +18,7 @@ BytesHandler = Callable[[bytes, str, Optional[RepoContext], Optional[ChunkPolicy
 
 
 def _default_bytes_handlers() -> Sequence[Tuple[Sniff, BytesHandler]]:
-    from .convert import get_default_bytes_handlers
-
-    return get_default_bytes_handlers()
-
-try:  # optional extras
-    from .qc import JSONLQualityScorer
-except Exception:  
-    JSONLQualityScorer = None  
-
+    return tuple(make_bytes_handlers())
 
 # ---------------------------------------------------------------------------
 # Source configs
@@ -178,18 +171,17 @@ class RepocapsuleConfig:
 
     def prepare(self) -> None:
         self.logging.apply()
-        if self.http.client is None:
-            self.http.client = SafeHttpClient(
-                timeout=self.http.timeout,
-                max_redirects=self.http.max_redirects,
-                allowed_redirect_suffixes=self.http.allowed_redirect_suffixes,
-            )
-        set_global_http_client(self.http.client)
+        client = make_http_client(self.http)
+        self.http.client = client
+        set_global_http_client(client)
         if not self.pipeline.bytes_handlers:
-            self.pipeline.bytes_handlers = get_default_bytes_handlers()
-        if self.qc.enabled and not self.qc.scorer and JSONLQualityScorer is not None:
-            self.qc.scorer = JSONLQualityScorer()
-        if self.qc.enabled and self.qc.scorer is None and JSONLQualityScorer is None:
+            self.pipeline.bytes_handlers = tuple(make_bytes_handlers())
+        if self.qc.enabled and not self.qc.scorer:
+            scorer = make_qc_scorer(self.qc)
+            if scorer is None:
+                raise RuntimeError("QC extras not installed; disable QC or install optional deps.")
+            self.qc.scorer = scorer
+        if self.qc.enabled and self.qc.scorer is None:
             raise RuntimeError("QC extras not installed; disable QC or install optional deps.")
         mode = (self.qc.mode or "inline").lower()
         if mode not in {"inline", "post"}:

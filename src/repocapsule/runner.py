@@ -8,16 +8,22 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 import json
 import os
-import re
 
 from .config import RepocapsuleConfig
-from .factories import build_default_sinks
+from .factories import (
+    build_default_sinks,
+    make_github_zip_source,
+    make_local_dir_source,
+    make_output_paths_for_github,
+    make_output_paths_for_pdf,
+    make_qc_scorer,
+    make_repo_context_from_git,
+)
 from .interfaces import RepoContext
+from .licenses import detect_license_in_tree, apply_license_to_context
 from .pipeline import run_pipeline
-from .githubio import GitHubZipSource, get_repo_info, parse_github_url
+from .githubio import get_repo_info, parse_github_url
 from .log import get_logger
-from .naming import build_output_basename_github, build_output_basename_pdf
-from .fs import LocalDirSource
 from .qc_utils import update_dup_family_counts, top_dup_families
 
 try:  # optional extra
@@ -81,7 +87,7 @@ def convert(config: RepocapsuleConfig) -> Dict[str, int]:
 def _run_post_qc(jsonl_path: Optional[str], qc_cfg) -> Dict[str, Any]:
     if not jsonl_path:
         raise RuntimeError("Cannot run post-QC summary without a primary JSONL path")
-    scorer = qc_cfg.scorer or (JSONLQualityScorer() if JSONLQualityScorer is not None else None)
+    scorer = qc_cfg.scorer or make_qc_scorer(qc_cfg)
     if scorer is None:
         raise RuntimeError("QC extras are not installed; disable QC or install optional dependencies.")
     rows = scorer.score_jsonl_path(str(jsonl_path))
@@ -203,12 +209,14 @@ def default_paths_for_github(
     except Exception:
         ref = ref or "main"
         lic = None
-    base = build_output_basename_github(
-        owner=spec.owner, repo=spec.repo, ref=ref, license_spdx=lic
+    outputs = make_output_paths_for_github(
+        owner=spec.owner,
+        repo=spec.repo,
+        ref=ref,
+        license_spdx=lic,
+        out_dir=Path(out_dir),
+        include_prompt=include_prompt,
     )
-    out_dir = str(out_dir)
-    jsonl = os.path.join(out_dir, f"{base}.jsonl")
-    prompt = os.path.join(out_dir, f"{base}.prompt.txt") if include_prompt else None
     ctx = RepoContext(
         repo_full_name=f"{spec.owner}/{spec.repo}",
         repo_url=f"https://github.com/{spec.owner}/{spec.repo}",
@@ -216,7 +224,7 @@ def default_paths_for_github(
         commit_sha=None,
         extra={"ref": ref},
     )
-    return jsonl, prompt, ctx
+    return str(outputs.jsonl), (str(outputs.prompt) if outputs.prompt else None), ctx
 
 
 def default_paths_for_pdf(
@@ -231,58 +239,22 @@ def default_paths_for_pdf(
     Compute dataset output paths for a PDF corpus given a URL/title/license.
     Returns (jsonl_path, prompt_path_or_None).
     """
-    base = build_output_basename_pdf(url=url, title=title, license_spdx=license_spdx)
-    out_dir = str(out_dir)
-    jsonl = os.path.join(out_dir, f"{base}.jsonl")
-    prompt = os.path.join(out_dir, f"{base}.prompt.txt") if include_prompt else None
-    return jsonl, prompt
+    outputs = make_output_paths_for_pdf(
+        url=url,
+        title=title,
+        license_spdx=license_spdx,
+        out_dir=Path(out_dir),
+        include_prompt=include_prompt,
+    )
+    return str(outputs.jsonl), (str(outputs.prompt) if outputs.prompt else None)
 
 
 # ---------- Local context helper ----------
 def _context_from_local_git(root: str | os.PathLike[str]) -> Optional[RepoContext]:
     """
-    Best-effort: if `root/.git/config` has a GitHub 'origin' remote,
-    derive a RepoContext. No network calls; safe to fail closed.
+    Thin wrapper around make_repo_context_from_git for backwards compatibility.
     """
-    cfg_path = Path(root) / ".git" / "config"
-    try:
-        text = cfg_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return None
-    origin_url: Optional[str] = None
-    fallback_url: Optional[str] = None
-    current_remote: Optional[str] = None
-    url_line = re.compile(r"^\s*url\s*=\s*([^\r\n]+)$")
-
-    for line in text.splitlines():
-        header = re.match(r'\s*\[remote\s+"([^"]+)"\]', line)
-        if header:
-            current_remote = header.group(1)
-            continue
-        if current_remote is None:
-            continue
-        m = url_line.match(line)
-        if not m:
-            continue
-        url_value = m.group(1).strip()
-        if current_remote == "origin":
-            origin_url = url_value
-            break
-        if fallback_url is None:
-            fallback_url = url_value
-
-    remote = origin_url or fallback_url
-    if not remote:
-        return None
-    spec = parse_github_url(remote)
-    if not spec:
-        return None
-    return RepoContext(
-        repo_full_name=f"{spec.owner}/{spec.repo}",
-        repo_url=f"https://github.com/{spec.owner}/{spec.repo}",
-        license_id=None,
-        extra={"source": "local"},
-    )
+    return make_repo_context_from_git(Path(root))
 
 
 # ---------- Convenience wrappers ----------
@@ -294,8 +266,22 @@ def convert_local_dir(
     base_config: Optional[RepocapsuleConfig] = None,
 ) -> Dict[str, int]:
     cfg = replace(base_config or RepocapsuleConfig())
-    ctx = cfg.sinks.context or _context_from_local_git(root_dir) or RepoContext(extra={"source": "local"})
-    sources = [LocalDirSource(root_dir, config=cfg.sources.local, context=ctx)]
+    ctx = (
+        cfg.sinks.context
+        or make_repo_context_from_git(Path(root_dir))
+        or RepoContext(extra={"source": "local"})
+    )
+    if not ctx.license_id:
+        license_id, meta = detect_license_in_tree(str(root_dir), None)
+        if license_id:
+            ctx = apply_license_to_context(ctx, license_id, meta)
+    sources = [
+        make_local_dir_source(
+            root_dir,
+            config=cfg.sources.local,
+            context=ctx,
+        )
+    ]
     sink_result = build_default_sinks(
         cfg.sinks,
         jsonl_path=out_jsonl,
@@ -325,7 +311,7 @@ def convert_github(
         extra={"source": "github"},
     )
     sources = [
-        GitHubZipSource(
+        make_github_zip_source(
             url,
             config=cfg.sources.github,
             context=ctx,

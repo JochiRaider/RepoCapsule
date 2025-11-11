@@ -24,17 +24,15 @@ from pathlib import Path
 from typing import Optional, Sequence
 from datetime import datetime
 
-from repocapsule.qc import JSONLQualityScorer
 from repocapsule.log import configure_logging
-# Current public API surface (re-exported at package level)
-from repocapsule import (
-    RepocapsuleConfig,
-    parse_github_url,
-    get_repo_license_spdx,
-    build_output_basename_github,
-    convert_github,
-)
+from repocapsule import RepocapsuleConfig, parse_github_url, get_repo_license_spdx, convert_github
 from repocapsule.chunk import ChunkPolicy
+from repocapsule.factories import make_output_paths_for_github
+
+try:
+    from repocapsule.qc import JSONLQualityScorer
+except Exception:
+    JSONLQualityScorer = None  # type: ignore[assignment]
 
 # Optional extractor for KQL blocks inside Markdown
 try:
@@ -47,7 +45,8 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Example GitHub repo to test:
-URL = "https://github.com/pallets/flask/tree/main/docs"
+# URL = "https://github.com/pallets/flask/tree/main/docs"
+URL = "https://github.com/JochiRaider/URL_Research_Tool"
 # URL = "https://github.com/chinapandaman/PyPDFForm"
 # URL = "https://github.com/SystemsApproach/book"
 REF: Optional[str] = None  # e.g. "main", "v1.0.0", or a commit SHA (only used for naming if spec.ref is None)
@@ -94,31 +93,34 @@ def _plan_output_paths(url: str, out_dir: Path, *, ref_hint: str | None, with_pr
     except Exception:
         pass
 
-    base = build_output_basename_github(
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    outputs = make_output_paths_for_github(
         owner=spec.owner,
         repo=spec.repo,
         ref=(spec.ref or ref_hint or "main"),
         license_spdx=spdx,
+        out_dir=out_dir,
+        include_prompt=with_prompt,
+        timestamp=timestamp,
     )
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jsonl = out_dir / f"{base}__{ts}.jsonl"
-    prompt = (out_dir / f"{base}__{ts}.prompt.txt") if with_prompt else None
-    return jsonl, prompt
+    return outputs.jsonl, outputs.prompt
 
 
 def _build_config(extractors: Sequence[object]) -> RepocapsuleConfig:
     cfg = RepocapsuleConfig()
     cfg.chunk.policy = POLICY
-    cfg.sources.github.include_exts = {".rst"}
+    # cfg.sources.github.include_exts = {".rst"}
     cfg.pipeline.extractors = tuple(extractors)
     cfg.sources.github.per_file_cap = int(MAX_FILE_MB) * 1024 * 1024
-    cfg.qc.scorer = JSONLQualityScorer(
-    lm_model_id="Qwen/Qwen2.5-1.5B",
-    device="cuda",        # or "cpu"
-    dtype="bfloat16",     # or "float32" / "float16"
-    local_files_only=False,
-    )
     if ENABLE_INLINE_QC:
+        if JSONLQualityScorer is None:
+            raise RuntimeError("Inline QC requested but optional QC extras are not installed.")
+        cfg.qc.scorer = JSONLQualityScorer(
+            lm_model_id="Qwen/Qwen2.5-1.5B",
+            device="cuda",        # or "cpu"
+            dtype="bfloat16",     # or "float32" / "float16"
+            local_files_only=False,
+        )
         cfg.qc.enabled = True
         cfg.qc.mode = "inline"
         cfg.qc.min_score = QC_MIN_SCORE
