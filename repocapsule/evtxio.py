@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
-import subprocess
-import tempfile
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Dict, Iterable, Optional, Any
@@ -137,34 +134,62 @@ def _event_json_with_raw(xml_text: str) -> str:
 
 # --- Optional recovery (EVTXtract) -------------------------------------------
 
-def _recover_with_evtxtract(data: bytes) -> Iterable[str]:
-    """
-    Best-effort recovery that shells out to EVTXtract if available.
+def _scan_evtx_file_magic_offsets(data: bytes, max_hits: int = 16) -> list[int]:
+    """Return offsets where an EVTX file header magic is found.
 
-    Returns XML fragments (strings). If EVTXtract isn't installed or fails,
-    yields nothing.
+    We cap hits to avoid pathological scans on very large blobs.
     """
-    # Resolve binary (either "evtxtract" or "python -m evtxtract")
-    candidates = [["evtxtract"], ["python", "-m", "evtxtract"], ["python3", "-m", "evtxtract"]]
-    with tempfile.NamedTemporaryFile(prefix="rc_evtx_", suffix=".bin", delete=True) as tf:
-        tf.write(data)
-        tf.flush()
-        for cmd in candidates:
+    offsets: list[int] = []
+    start = 0
+    magic = _EVTX_FILE_MAGIC
+    while len(offsets) < max_hits:
+        idx = data.find(magic, start)
+        if idx == -1:
+            break
+        offsets.append(idx)
+        start = idx + 1
+    return offsets
+
+
+def _recover_best_effort_with_python_evtx(data: bytes) -> Iterable[str]:
+    """\
+    Best-effort recovery using python-evtx only.
+
+    Strategy:
+    - Scan for EVTX file header magic ("ElfFile") within the blob.
+    - For each candidate offset, attempt to open an Evtx view on the slice
+      starting at that offset.
+    - Yield record.xml() for any successfully parsed records.
+
+    This does *not* attempt heavy-duty carving of individual chunks; it's a
+    lightweight, dependency-free salvage path for blobs that contain embedded
+    or slightly damaged EVTX files.
+    """
+    # First, if the blob itself starts with an EVTX header, we've already
+    # tried that in the main handler and failed. Focus on secondary headers.
+    offsets = _scan_evtx_file_magic_offsets(data)
+
+    # If there is exactly one hit at offset 0, there's likely nothing more
+    # to salvage that the primary parse didn't already attempt.
+    if offsets == [0]:
+        return ()
+
+    def _iter() -> Iterable[str]:
+        for off in offsets:
+            # Skip the primary header at offset 0; we already tried it.
+            if off == 0:
+                continue
             try:
-                proc = subprocess.run(
-                    cmd + [tf.name],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
+                with Evtx(BytesIO(data[off:])) as log:
+                    for rec in log.records():
+                        yield rec.xml()
             except Exception:
+                # Any failures here are expected; just move on to the next
+                # candidate offset.
                 continue
-            if proc.returncode != 0 or not proc.stdout:
-                continue
-            # Heuristic: EVTXtract prints <Event ...>...</Event> fragments; extract them.
-            # Keep it robust to whitespace and newlines.
-            return re.findall(r"<Event[^>]*>.*?</Event>", proc.stdout, flags=re.DOTALL)
-    return ()
+
+    return _iter()
+
 
 
 # --- Public handler -----------------------------------------------------------
@@ -185,8 +210,12 @@ def handle_evtx(
     Stream one JSONL record per event.
 
     Normal path: python-evtx -> record.xml() -> normalize to JSON (plus raw_xml).
-    Optional fallback: pass allow_recovery=True (or set REPOCAPSULE_EVTX_RECOVER=1)
-    to try EVTXtract recovery when python-evtx fails or yields zero events.
+
+    Optional fallback: pass allow_recovery=True (or set
+    REPOCAPSULE_EVTX_RECOVER=1) to try a best-effort recovery using only
+    python-evtx when the primary parse fails or yields zero events. This
+    recovery scans for embedded EVTX file headers within the blob and
+    attempts to parse from those offsets.
     """
     use_recovery = allow_recovery
     if use_recovery is None:
@@ -225,7 +254,7 @@ def handle_evtx(
 
     # Recovery path
     if not parsed_any and use_recovery:
-        for xml_text in _recover_with_evtxtract(data):
+        for xml_text in _recover_best_effort_with_python_evtx(data):
             j = _parse_event_xml(xml_text)
             yield build_record(
                 text=_event_json_with_raw(xml_text),
@@ -244,6 +273,6 @@ def handle_evtx(
                     "event_record_id": j.get("event_record_id"),
                     "timestamp": j.get("timestamp"),
                     "recovered": True,
-                    "recovery_tool": "EVTXtract",
+                    "recovery_strategy": "python-evtx-carve",
                 },
             )
