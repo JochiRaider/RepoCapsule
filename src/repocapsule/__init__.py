@@ -73,7 +73,6 @@ from .records import (
 
 # Converters
 from .convert import make_records_for_file, make_records_from_bytes
-from .export import annotate_exact_token_counts
 
 # Web PDF sources
 from .sources_webpdf import WebPdfListSource, WebPagePdfSource
@@ -118,7 +117,6 @@ __all__ = [
     "sha256_text", "build_record",
     # convert
     "make_records_for_file", "make_records_from_bytes", 
-    "annotate_exact_token_counts",
     # web sources
     "WebPdfListSource", "WebPagePdfSource",  
     # runner / sinks
