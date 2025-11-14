@@ -8,8 +8,8 @@ from typing import Any, Optional
 
 try:
     import tiktoken
-except Exception:  # pragma: no cover - optional dependency
-    tiktoken = None  # type: ignore[assignment]
+except Exception:  
+    tiktoken = None  
 
 __all__ = ["annotate_exact_token_counts"]
 

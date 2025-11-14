@@ -94,6 +94,7 @@ class Block:
     start: int
     end: int
     tokens: int
+    kind: str = "text"
 
 # ----------------
 # Markdown Splitter
@@ -105,6 +106,9 @@ _SETEXT_UNDERLINE = re.compile(r'^[ \t]{0,3}(=+|-+)[ \t]*$', re.M)
 # Fenced code blocks: triple backticks or tildes; simple heuristic.
 _FENCE_START = re.compile(r'^[ \t]{0,3}(```+|~~~+)[ \t]*.*$', re.M)
 _FENCE_CLOSE = re.compile(r'^[ \t]{0,3}([`~]{3,})[ \t]*$', re.M)
+
+_PARA_SPLITTER = re.compile(r'\n[ \t]*\n+')
+_SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])(?:["\')\]]+)?\s+(?=[A-Z0-9])')
 
 def _split_markdown_blocks(text: str, tokenizer) -> List[Block]:
     """
@@ -126,7 +130,7 @@ def _split_markdown_blocks(text: str, tokenizer) -> List[Block]:
         if buf:
             block_text = "".join(buf)
             tokens = count_tokens(block_text, tokenizer, "doc")
-            out.append(Block(block_text, bstart, bstart + len(block_text), tokens))
+            out.append(Block(block_text, bstart, bstart + len(block_text), tokens, kind="text"))
             buf = []
 
     while i < n:
@@ -154,14 +158,14 @@ def _split_markdown_blocks(text: str, tokenizer) -> List[Block]:
                     break
             block_text = "".join(buf2)
             tokens = count_tokens(block_text, tokenizer, "code") # Fences are code
-            out.append(Block(block_text, start, start + len(block_text), tokens))
+            out.append(Block(block_text, start, start + len(block_text), tokens, kind="code"))
             continue
 
         # ATX heading
         if re.match(r'^[ \t]{0,3}#{1,6}[ \t]+\S', line):
             flush()
             tokens = count_tokens(line, tokenizer, "doc")
-            out.append(Block(line, pos, pos + ln, tokens))
+            out.append(Block(line, pos, pos + ln, tokens, kind="heading"))
             pos += ln
             i += 1
             bstart = pos
@@ -172,7 +176,7 @@ def _split_markdown_blocks(text: str, tokenizer) -> List[Block]:
             flush()
             block_text = lines[i] + lines[i + 1]
             tokens = count_tokens(block_text, tokenizer, "doc")
-            out.append(Block(block_text, pos, pos + len(block_text), tokens))
+            out.append(Block(block_text, pos, pos + len(block_text), tokens, kind="heading"))
             pos += len(block_text)
             i += 2
             bstart = pos
@@ -201,6 +205,15 @@ _RST_OVERLINE = _RST_UNDERLINE
 _RST_DIR = re.compile(r'^\s*\.\.\s+([A-Za-z][\w-]*)::(?:\s*(\S.*))?$', re.ASCII)
 # Literal blocks introduced by paragraph ending with '::'
 _RST_LITERAL_PARA_END = re.compile(r'::\s*$')
+_RST_CODE_DIRECTIVES = {
+    "code",
+    "code-block",
+    "codeblock",
+    "literal",
+    "literalinclude",
+    "sourcecode",
+    "highlight",
+}
 
 
 def _leading_spaces(s: str) -> int:
@@ -244,7 +257,7 @@ def _split_rst_blocks(text: str, tokenizer) -> List[Block]:
         if buf:
             block_text = "".join(buf)
             tokens = count_tokens(block_text, tokenizer, "doc")
-            out.append(Block(block_text, bstart, bstart + len(block_text), tokens))
+            out.append(Block(block_text, bstart, bstart + len(block_text), tokens, kind="text"))
             buf = []
 
     while i < n:
@@ -267,7 +280,7 @@ def _split_rst_blocks(text: str, tokenizer) -> List[Block]:
                 pos += len(block_text)
                 i += 3
                 tokens = count_tokens(block_text, tokenizer, "doc")
-                out.append(Block(block_text, start, start + len(block_text), tokens))
+                out.append(Block(block_text, start, start + len(block_text), tokens, kind="heading"))
                 bstart = pos
                 continue
 
@@ -284,7 +297,7 @@ def _split_rst_blocks(text: str, tokenizer) -> List[Block]:
             pos += len(block_text)
             i += 2
             tokens = count_tokens(block_text, tokenizer, "doc")
-            out.append(Block(block_text, start, start + len(block_text), tokens))
+            out.append(Block(block_text, start, start + len(block_text), tokens, kind="heading"))
             bstart = pos
             continue
 
@@ -318,7 +331,9 @@ def _split_rst_blocks(text: str, tokenizer) -> List[Block]:
                     break
             block_text = "".join(buf2)
             tokens = count_tokens(block_text, tokenizer, "doc")
-            out.append(Block(block_text, start, start + len(block_text), tokens))
+            dir_name = (mdir.group(1) or "").lower()
+            kind = "code" if dir_name in _RST_CODE_DIRECTIVES else "text"
+            out.append(Block(block_text, start, start + len(block_text), tokens, kind=kind))
             bstart = pos
             continue
 
@@ -415,6 +430,10 @@ class ChunkPolicy:
     min_tokens : int
         Minimum chunk size. If a block would make the previous chunk too short,
         it is appended to reach the minimum.
+    semantic_doc : bool
+        Enables optional sentence/paragraph-aware splitting for doc mode.
+    semantic_tokens_per_block : Optional[int]
+        Target token count for semantic sub-blocks when `semantic_doc` is True.
 
     Notes
     -----
@@ -424,6 +443,127 @@ class ChunkPolicy:
     target_tokens: int = 1700
     overlap_tokens: int = 40
     min_tokens: int = 400
+    semantic_doc: bool = False
+    semantic_tokens_per_block: Optional[int] = None
+
+
+def _semantic_block_limit(pol: ChunkPolicy) -> int:
+    base = pol.semantic_tokens_per_block or 0
+    if base <= 0:
+        base = min(pol.target_tokens, 600)
+    base = max(pol.min_tokens, base)
+    return max(80, base)
+
+
+def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
+    spans: List[Tuple[int, int]] = []
+    last = 0
+    for match in _PARA_SPLITTER.finditer(text):
+        end = match.end()
+        spans.append((last, end))
+        last = end
+    if last < len(text):
+        spans.append((last, len(text)))
+    if not spans:
+        spans.append((0, len(text)))
+    return spans
+
+
+def _split_sentences(segment_text: str, abs_start: int, limit_tokens: int, tokenizer) -> List[Block]:
+    spans: List[Tuple[int, int]] = []
+    last = 0
+    for match in _SENTENCE_BOUNDARY.finditer(segment_text):
+        end = match.end()
+        spans.append((last, end))
+        last = end
+    if last < len(segment_text):
+        spans.append((last, len(segment_text)))
+    if not spans:
+        tokens = count_tokens(segment_text, tokenizer, "doc")
+        return [Block(segment_text, abs_start, abs_start + len(segment_text), tokens, kind="text")]
+
+    min_group = max(1, limit_tokens // 2)
+    groups: List[Tuple[int, int, int]] = []
+    cur_start, cur_end = spans[0]
+    cur_tokens = count_tokens(segment_text[cur_start:cur_end], tokenizer, "doc")
+    for seg_start, seg_end in spans[1:]:
+        seg_text = segment_text[seg_start:seg_end]
+        seg_tokens = count_tokens(seg_text, tokenizer, "doc")
+        if cur_tokens + seg_tokens <= limit_tokens or cur_tokens < min_group:
+            cur_end = seg_end
+            cur_tokens += seg_tokens
+        else:
+            groups.append((cur_start, cur_end, cur_tokens))
+            cur_start = seg_start
+            cur_end = seg_end
+            cur_tokens = seg_tokens
+    groups.append((cur_start, cur_end, cur_tokens))
+
+    out: List[Block] = []
+    for rel_start, rel_end, tok_count in groups:
+        sub_text = segment_text[rel_start:rel_end]
+        out.append(
+            Block(
+                sub_text,
+                abs_start + rel_start,
+                abs_start + rel_end,
+                tok_count,
+                kind="text",
+            )
+        )
+    return out
+
+
+def _split_paragraph_span(
+    block_text: str,
+    span_start: int,
+    span_end: int,
+    block_abs_start: int,
+    limit_tokens: int,
+    tokenizer,
+) -> List[Block]:
+    if span_end <= span_start:
+        return []
+    segment = block_text[span_start:span_end]
+    abs_start = block_abs_start + span_start
+    tokens = count_tokens(segment, tokenizer, "doc")
+    if tokens <= limit_tokens or not _SENTENCE_BOUNDARY.search(segment):
+        return [Block(segment, abs_start, abs_start + len(segment), tokens, kind="text")]
+    return _split_sentences(segment, abs_start, limit_tokens, tokenizer)
+
+
+def _split_text_block_semantic(block: Block, limit_tokens: int, tokenizer) -> List[Block]:
+    spans = _paragraph_spans(block.text)
+    refined: List[Block] = []
+    for span_start, span_end in spans:
+        refined.extend(
+            _split_paragraph_span(
+                block.text,
+                span_start,
+                span_end,
+                block.start,
+                limit_tokens,
+                tokenizer,
+            )
+        )
+    return refined or [block]
+
+
+def _semantic_refine_doc_blocks(
+    blocks: List[Block],
+    policy: ChunkPolicy,
+    tokenizer,
+) -> List[Block]:
+    if not policy.semantic_doc:
+        return blocks
+    limit = _semantic_block_limit(policy)
+    refined: List[Block] = []
+    for block in blocks:
+        if block.kind != "text" or block.tokens <= limit:
+            refined.append(block)
+            continue
+        refined.extend(_split_text_block_semantic(block, limit, tokenizer))
+    return refined
 
 
 def _take_tail_chars_for_overlap(text: str, approx_tokens: int, mode: str) -> str:
@@ -471,7 +611,12 @@ def _pack_blocks(
         cur_start = None
         cur_len_tok = 0
 
+    heading_flush_tokens = max(1, min_tokens // 2)
+
     for block in blocks:
+        if cur_buf and block.kind == "heading" and cur_len_tok >= heading_flush_tokens:
+            flush()
+
         b_tokens = block.tokens
         if not cur_buf:
             cur_buf = [block.text]
@@ -540,7 +685,7 @@ def _split_code_lines(text: str, tokenizer) -> List[Block]:
         if buf:
             s = "".join(buf)
             tokens = count_tokens(s, tokenizer, "code")
-            blocks.append(Block(s, start, start + len(s), tokens))
+            blocks.append(Block(s, start, start + len(s), tokens, kind="code"))
             buf = []
     blank_run = 0
     MAX_RUN = 4000  # soft guard for giant files
@@ -574,7 +719,7 @@ def chunk_text(
     High-level chunker. Returns a list of dicts:
       { "text": str, "n_tokens": int, "start": int, "end": int }
 
-    - mode="doc": uses split_doc_blocks(fmt) then packs blocks
+    - mode="doc": uses split_doc_blocks(fmt) with optional semantic refinement then packs blocks
     - mode="code": uses simple line-based blocks then packs
 
     Set `fmt` to "markdown" / "restructuredtext" for docs.
@@ -586,6 +731,7 @@ def chunk_text(
 
     if mode == "doc":
         blocks = split_doc_blocks(text, fmt, tok)
+        blocks = _semantic_refine_doc_blocks(blocks, pol, tok)
     else:
         blocks = _split_code_lines(text, tok)
 
