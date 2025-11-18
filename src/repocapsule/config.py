@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Type, TypeVar, Union, get_args, get_origin
 
 from .chunk import ChunkPolicy
-from .factories import make_bytes_handlers, make_http_client, make_qc_scorer
-from .interfaces import Extractor, RepoContext, Source, Record
-from .log import configure_logging, PACKAGE_LOGGER_NAME
+from .factories import make_bytes_handlers, make_qc_scorer
+from .interfaces import Extractor, FileExtractor, RepoContext, Source, Sink, Record, QualityScorer
+from .log import configure_logging, PACKAGE_LOGGER_NAME, get_logger
 from .safe_http import SafeHttpClient, set_global_http_client
+from .records import build_run_header_record
+
+log = get_logger(__name__)
 
 
 # Local copies of the bytes-handler type aliases to avoid circular imports at runtime.
@@ -21,6 +24,52 @@ BytesHandler = Callable[[bytes, str, Optional[RepoContext], Optional[ChunkPolicy
 
 def _default_bytes_handlers() -> Sequence[Tuple[Sniff, BytesHandler]]:
     return tuple(make_bytes_handlers())
+
+# ---------------------------------------------------------------------------
+# QC mode helpers
+# ---------------------------------------------------------------------------
+
+
+class QCMode:
+    """
+    Supported quality-control modes.
+
+    OFF:
+        Disable QC entirely (no scoring, no annotations).
+    INLINE:
+        Score records during extraction and enforce gating (records may be dropped).
+    ADVISORY:
+        Score records inline but never drop them; annotations are for review only.
+    POST:
+        Run QC after the pipeline completes (no inline annotations or gating).
+    """
+
+    INLINE = "inline"
+    POST = "post"
+    ADVISORY = "advisory"
+    OFF = "off"
+    ALL = {INLINE, POST, ADVISORY}
+    WITH_OFF = ALL | {OFF}
+
+    @classmethod
+    def normalize(cls, value: Optional[str]) -> str:
+        mode = (value or cls.INLINE).strip().lower()
+        if mode not in cls.WITH_OFF:
+            raise ValueError(f"Invalid QC mode: {value!r}. Expected one of {sorted(cls.WITH_OFF)}")
+        return mode
+
+    @classmethod
+    def is_inline(cls, mode: str) -> bool:
+        return mode == cls.INLINE
+
+    @classmethod
+    def is_post(cls, mode: str) -> bool:
+        return mode == cls.POST
+
+    @classmethod
+    def is_advisory(cls, mode: str) -> bool:
+        return mode == cls.ADVISORY
+
 
 # ---------------------------------------------------------------------------
 # Source configs
@@ -34,6 +83,8 @@ class LocalDirSourceConfig:
     follow_symlinks: bool = False
     respect_gitignore: bool = True
     max_file_bytes: Optional[int] = 200 * 1024 * 1024
+    read_prefix_bytes: Optional[int] = None
+    read_prefix_for_large_files_only: bool = True
 
 
 @dataclass(slots=True)
@@ -48,13 +99,20 @@ class GitHubSourceConfig:
 
 @dataclass(slots=True)
 class PdfSourceConfig:
+    """
+    Settings for web PDF fetching; download_* controls concurrency for WebPdfListSource/WebPagePdfSource only.
+    """
     timeout: int = 60
-    max_pdf_bytes: int = 200 * 1024 * 1024
+    max_pdf_bytes: int = 200 * 1024 * 1024  # Streaming cap; responses exceeding it are aborted.
     max_links: int = 200
     require_pdf: bool = True
     include_ambiguous: bool = False
     retries: int = 1
     user_agent: str = "repocapsule/0.1 (+https://github.com)"
+    client: Optional[SafeHttpClient] = None
+    download_max_workers: int = 4  # 0 or negative → auto based on URL count
+    download_submit_window: Optional[int] = None
+    download_executor_kind: str = "thread"
 
 
 @dataclass(slots=True)
@@ -74,7 +132,7 @@ class DecodeConfig:
     normalize: Optional[str] = "NFC"
     strip_controls: bool = True
     fix_mojibake: bool = True
-    max_bytes_per_file: Optional[int] = None
+    max_bytes_per_file: Optional[int] = None  # Bytes passed to the decoder per file (soft cap).
 
 
 @dataclass(slots=True)
@@ -86,7 +144,21 @@ class ChunkConfig:
 
 @dataclass(slots=True)
 class PipelineConfig:
+    """
+    Controls pipeline concurrency and processing behavior.
+
+    max_workers = 0 → auto (os.cpu_count or 1)
+    submit_window = None → defaults to max_workers * 4
+    executor_kind ∈ {"thread", "process"}
+
+    Where this applies:
+    - main extraction pipeline (file decoding/chunking/sink writes)
+    - defaults for post-QC when QCConfig.parallel_post is True and no QC overrides are set
+    Does not control web PDF fetch concurrency (see PdfSourceConfig.download_*).
+    """
+
     extractors: Sequence[Extractor] = field(default_factory=tuple)
+    file_extractor: Optional[FileExtractor] = None
     bytes_handlers: Sequence[Tuple[Sniff, BytesHandler]] = field(
         default_factory=_default_bytes_handlers
     )
@@ -94,6 +166,17 @@ class PipelineConfig:
     submit_window: Optional[int] = None
     fail_fast: bool = False
     executor_kind: str = "thread"
+
+
+@dataclass(slots=True, frozen=True)
+class FileProcessingConfig:
+    """
+    Lightweight view used by worker processes that only need per-file settings.
+    """
+
+    decode: DecodeConfig
+    chunk: ChunkConfig
+    pipeline: PipelineConfig
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +191,7 @@ class PromptConfig:
 
 @dataclass(slots=True)
 class SinkConfig:
-    sinks: Sequence = field(default_factory=tuple)
+    sinks: Sequence[Sink] = field(default_factory=tuple)
     context: Optional[RepoContext] = None
     output_dir: Path = Path(".")
     primary_jsonl_name: Optional[str] = None
@@ -127,6 +210,19 @@ class HttpConfig:
     max_redirects: int = 5
     allowed_redirect_suffixes: Tuple[str, ...] = ("github.com",)
     client: Optional[SafeHttpClient] = None
+    as_global: bool = True
+
+    def build_client(self) -> SafeHttpClient:
+        """Construct (or reuse) the SafeHttpClient for this config without mutating globals."""
+        if self.client is not None:
+            return self.client
+        client = SafeHttpClient(
+            timeout=self.timeout,
+            max_redirects=self.max_redirects,
+            allowed_redirect_suffixes=self.allowed_redirect_suffixes,
+        )
+        self.client = client
+        return client
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +231,25 @@ class HttpConfig:
 
 @dataclass(slots=True)
 class QCConfig:
+    """
+    Configuration for quality scoring and gating.
+
+    Set ``enabled=True`` and pick a ``mode`` from :class:`QCMode`:
+
+    - ``INLINE``: score records during extraction and drop those failing thresholds.
+    - ``ADVISORY``: score inline but never drop; adds QC metadata for review.
+    - ``POST``: skip inline scoring; run QC by re-reading the JSONL output.
+    - ``OFF``: disable QC entirely.
+
+    Semantics:
+    - enabled=False → QC is off regardless of mode.
+    - enabled=True with mode in {"inline", "advisory"} → requires a scorer and QC extras; validated at config prep.
+    - enabled=True with mode="post" → scorer optional; if QC extras are missing, QC is skipped with a warning.
+    Concurrency:
+    - ``parallel_post`` enables post-QC scoring via process_items_parallel.
+    - ``post_*`` knobs override pipeline concurrency for post-QC; when None, they inherit from PipelineConfig.
+    """
+
     enabled: bool = False
     write_csv: bool = False
     csv_suffix: str = "_quality.csv"
@@ -142,8 +257,23 @@ class QCConfig:
     fail_on_error: bool = False
     min_score: Optional[float] = 60.0
     drop_near_dups: bool = False
-    mode: str = "inline"
+    mode: str = QCMode.INLINE
     parallel_post: bool = False
+    post_executor_kind: Optional[str] = None
+    post_max_workers: Optional[int] = None
+    post_submit_window: Optional[int] = None
+
+    def normalize_mode(self) -> str:
+        normalized = QCMode.normalize(self.mode)
+        self.mode = normalized
+        return normalized
+
+    def validate(self) -> None:
+        mode = self.normalize_mode()
+        if self.enabled and mode == QCMode.OFF:
+            raise ValueError("QC enabled but mode is 'off'; disable qc.enabled or choose an active mode.")
+        if self.enabled and mode in {QCMode.INLINE, QCMode.ADVISORY} and self.scorer is None:
+            raise ValueError("Inline/advisory QC requires a scorer; set qc.scorer or install QC extras.")
 
 
 @dataclass(slots=True)
@@ -247,54 +377,132 @@ class RepocapsuleConfig:
     def with_context(self, ctx: RepoContext) -> RepocapsuleConfig:
         return replace(self, sinks=replace(self.sinks, context=ctx))
 
-    def prepare(self) -> None:
-        self.logging.apply()
-        client = make_http_client(self.http)
+    def prepared(self, *, mutate: bool = False) -> "RepocapsuleConfig":
+        """
+        Apply defaults and wiring, returning a runtime-ready configuration.
+
+        Prefer this method over any mutating setup helpers; when ``mutate`` is
+        False (the default) a shallow copy is prepared so the original config
+        remains reusable.
+        """
+
+        cfg = self if mutate else replace(self)
+        cfg.logging.apply()
+        cfg._prepare_http()
+        cfg._prepare_sources()
+        cfg._prepare_sinks()
+        cfg._prepare_pipeline()
+        cfg._prepare_qc()
+        cfg._attach_run_header_record()
+        cfg.validate()
+        return cfg
+
+    def _prepare_http(self) -> None:
+        client = self.http.build_client()
         self.http.client = client
-        set_global_http_client(client)
+        if self.http.as_global:
+            set_global_http_client(client)
+
+    def _prepare_sources(self) -> None:
+        """
+        Hook for future normalization of source configs (currently a no-op).
+        """
+        return None
+
+    def _prepare_sinks(self) -> None:
+        sinks = self.sinks
+        meta = self.metadata
+        primary = sinks.primary_jsonl_name or meta.primary_jsonl
+        if not primary:
+            return
+        primary_str = str(primary)
+        sinks.primary_jsonl_name = primary_str
+        meta.primary_jsonl = primary_str
+
+        output_dir = sinks.output_dir
+        needs_output_dir = output_dir is None or str(output_dir) in {"", "."}
+        if needs_output_dir:
+            try:
+                parent = Path(primary_str).parent
+            except Exception:
+                parent = None
+            if parent:
+                sinks.output_dir = parent
+
+    def _attach_run_header_record(self) -> None:
+        header = build_run_header_record(self)
+        for sink in getattr(self.sinks, "sinks", ()):
+            setter = getattr(sink, "set_header_record", None)
+            if callable(setter):
+                setter(header)
+
+    def _prepare_pipeline(self) -> None:
         if not self.pipeline.bytes_handlers:
             self.pipeline.bytes_handlers = tuple(make_bytes_handlers())
-        if self.qc.enabled and not self.qc.scorer:
-            scorer = make_qc_scorer(self.qc)
-            if scorer is None:
-                raise RuntimeError("QC extras not installed; disable QC or install optional deps.")
-            self.qc.scorer = scorer
-        if self.qc.enabled and self.qc.scorer is None:
-            raise RuntimeError("QC extras not installed; disable QC or install optional deps.")
-        mode = (self.qc.mode or "inline").lower()
-        allowed_modes = {"inline", "post", "off", "advisory"}
-        if mode not in allowed_modes:
-            raise ValueError(f"Invalid qc.mode {self.qc.mode!r}; expected one of {sorted(allowed_modes)}")
-        if mode == "off":
-            self.qc.enabled = False
-        self.qc.mode = mode
-        self.validate()
+        if self.pipeline.file_extractor is None:
+            from .convert import DefaultExtractor  # local import to avoid cycle
+
+            self.pipeline.file_extractor = DefaultExtractor()
+
+    def _prepare_qc(self) -> None:
+        qc_cfg = self.qc
+        mode = qc_cfg.normalize_mode()
+        if not qc_cfg.enabled or mode == QCMode.OFF:
+            qc_cfg.enabled = False
+            qc_cfg.mode = QCMode.OFF
+            return
+
+        if mode in {QCMode.INLINE, QCMode.ADVISORY}:
+            if qc_cfg.scorer is not None and not isinstance(qc_cfg.scorer, QualityScorer):
+                raise TypeError("qc.scorer must implement the QualityScorer protocol for inline/advisory modes.")
+            if qc_cfg.scorer is None:
+                scorer = make_qc_scorer(qc_cfg)
+                if scorer is None:
+                    raise RuntimeError(
+                        "Inline/advisory QC requested but QC extras are not installed; disable qc.enabled or install QC dependencies."
+                    )
+                qc_cfg.scorer = scorer
+            return
+
+        if mode == QCMode.POST and qc_cfg.scorer is None:
+            scorer = make_qc_scorer(qc_cfg, new_instance=False)
+            if scorer is not None:
+                qc_cfg.scorer = scorer
+            else:
+                log.warning("QC POST mode enabled but QC extras are not installed; skipping QC for this run.")
+                qc_cfg.enabled = False
+                qc_cfg.mode = QCMode.OFF
+                qc_cfg.scorer = None
 
     def validate(self) -> None:
+        self._validate_paths()
+        self.qc.validate()
+        if self.pipeline.executor_kind not in {"thread", "process"}:
+            raise ValueError("pipeline.executor_kind must be 'thread' or 'process'.")
+
+    def _validate_paths(self) -> None:
         meta = self.metadata
         p_jsonl = meta.primary_jsonl
         prompt = meta.prompt_path
-        if p_jsonl and prompt:
-            try:
-                if Path(p_jsonl).resolve() == Path(prompt).resolve():
-                    raise ValueError("primary_jsonl and prompt_path refer to the same file path.")
-            except Exception:
-                if p_jsonl == prompt:
-                    raise ValueError("primary_jsonl and prompt_path refer to the same file path.")
-
-        if self.qc.enabled and self.qc.mode not in {"inline", "post", "advisory"}:
-            raise ValueError("QC enabled but mode is set to 'off'; disable QC or change mode.")
-
-        if self.qc.enabled and self.qc.mode in {"inline", "advisory"} and not self.qc.scorer:
-            raise ValueError("QC mode requires a scorer; ensure qc.scorer is configured or extras installed.")
-
-        if self.pipeline.executor_kind not in {"thread", "process"}:
-            raise ValueError("pipeline.executor_kind must be 'thread' or 'process'.")
+        if not (p_jsonl and prompt):
+            return
+        try:
+            if Path(p_jsonl).resolve() == Path(prompt).resolve():
+                raise ValueError("primary_jsonl and prompt_path refer to the same file path.")
+        except Exception:
+            if p_jsonl == prompt:
+                raise ValueError("primary_jsonl and prompt_path refer to the same file path.")
 
     # -------------------------
     # Serialization helpers
     # -------------------------
     def to_dict(self) -> Dict[str, Any]:
+        """
+        Return a JSON-serializable representation of this configuration.
+
+        Suitable for embedding in RunSummaryMeta.config or persisting via to_json();
+        skips non-serializable runtime objects like sources, sinks, HTTP clients, or scorer instances.
+        """
         return _dataclass_to_dict(self)
 
     def to_json(self, path: Path | str, *, indent: int = 2) -> str:
@@ -316,13 +524,14 @@ class RepocapsuleConfig:
 _SKIP_FIELDS: Dict[Type[Any], set[str]] = {
     SourceConfig: {"sources"},
     SinkConfig: {"sinks"},
-    PipelineConfig: {"extractors", "bytes_handlers"},
+    PipelineConfig: {"extractors", "bytes_handlers", "file_extractor"},
     HttpConfig: {"client"},
     QCConfig: {"scorer"},
 }
 
 
 def _dataclass_to_dict(obj: Any) -> Dict[str, Any]:
+    """Serialize dataclasses to JSON-friendly dicts, skipping None and non-serializable fields."""
     result: Dict[str, Any] = {}
     obj_type = type(obj)
     skip = _SKIP_FIELDS.get(obj_type, set())
@@ -339,6 +548,7 @@ def _dataclass_to_dict(obj: Any) -> Dict[str, Any]:
 
 
 def _serialize_value(value: Any) -> Any:
+    """Best-effort JSON-friendly coercion; drops values that cannot be serialized."""
     if value is None:
         return None
     if isinstance(value, (str, int, float, bool)):
@@ -421,4 +631,4 @@ def is_dataclass_type(typ: Any) -> bool:
 
 
 
-__all__ = ["RepocapsuleConfig", "RunMetadata"]
+__all__ = ["RepocapsuleConfig", "RunMetadata", "FileProcessingConfig"]
