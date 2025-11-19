@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import gzip
 import json
 import math
+import os
 import random
 import re
 import zlib
-from typing import Any, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, TextIO
 
 __all__ = [
     "CODE_LANGS",
@@ -28,6 +31,8 @@ __all__ = [
     "PerplexityModel",
     "update_dup_family_counts",
     "top_dup_families",
+    "open_jsonl_maybe_gz",
+    "open_jsonl_output_maybe_gz",
 ]
 
 
@@ -78,6 +83,29 @@ TEXTY = {"Markdown", "Text", "reStructuredText", "HTML"}
 CODE_LANGS_LC = {x.lower() for x in CODE_LANGS}
 LOG_LIKE_LC = {x.lower() for x in LOG_LIKE}
 TEXTY_LC = {x.lower() for x in TEXTY}
+
+
+def open_jsonl_maybe_gz(path: str | os.PathLike[str]) -> TextIO:
+    """
+    Open a JSONL file for reading, treating any .gz suffix as gzip-compressed text.
+
+    Intended for JSONL lines (one JSON per line) and used by QC for both post-QC
+    and CSV scoring helpers.
+    """
+    p = Path(path)
+    if p.suffix.lower() == ".gz":
+        return gzip.open(p, "rt", encoding="utf-8")
+    return open(p, "r", encoding="utf-8")
+
+
+def open_jsonl_output_maybe_gz(path: str | os.PathLike[str], mode: str = "a") -> TextIO:
+    """
+    Open a JSONL file for writing/appending, compressing if the destination ends with .gz.
+    """
+    p = Path(path)
+    if p.suffix.lower() == ".gz":
+        return gzip.open(p, f"{mode}t", encoding="utf-8")
+    return open(p, mode, encoding="utf-8")
 
 
 def target_band(lang: str) -> tuple[int, int]:
