@@ -5,13 +5,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import (
+    IO,
     Any,
+    Dict,
     Iterable,
     Mapping,
     Optional,
     Protocol,
+    TYPE_CHECKING,
     runtime_checkable,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from .config import RepocapsuleConfig, FileProcessingConfig
 
 
 # -----------------------------------------------------------------------------
@@ -29,13 +35,23 @@ class FileItem:
         Repository-relative path using forward slashes, e.g. "src/main.py".
     data:
         Raw file bytes as obtained from the source (zip entry, filesystem, etc.).
-        Decoding to text is performed later by the pipeline/decoder.
+        Decoding to text is performed later by the pipeline/decoder. Data may be
+        a truncated prefix when only part of a large file was read.
     size:
-        Size in bytes (redundant with len(data) but convenient for logging).
+        Original size in bytes on disk / source (may differ from len(data)).
+    origin_path:
+        Absolute/local path or synthetic identifier for reopening when possible.
+    stream_hint:
+        Optional tag describing how to reopen (e.g., "file", "zip-member").
+    streamable:
+        True when a streaming path exists (e.g., local filesystem files).
     """
     path: str
     data: bytes
     size: int | None = None
+    origin_path: str | None = None
+    stream_hint: str | None = None
+    streamable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +67,26 @@ class RepoContext:
     commit_sha: Optional[str] = None         # archive commit or ref resolved
     # Free-form bag for future metadata (timestamps, labels, etc.)
     extra: Optional[Mapping[str, Any]] = None
+
+    def as_meta_seed(self) -> Dict[str, Any]:
+        """Return a dict of metadata fields that should seed every record."""
+        meta: Dict[str, Any] = {}
+        if self.repo_url:
+            meta.setdefault("source", self.repo_url)
+            meta.setdefault("repo_url", self.repo_url)
+        if self.repo_full_name:
+            meta.setdefault("repo", self.repo_full_name)
+            meta.setdefault("repo_full_name", self.repo_full_name)
+        if self.license_id:
+            meta.setdefault("license", self.license_id)
+        if self.commit_sha:
+            meta.setdefault("commit_sha", self.commit_sha)
+        if self.extra:
+            for key, value in self.extra.items():
+                if value is None:
+                    continue
+                meta.setdefault(str(key), value)
+        return meta
 
 
 # A JSONL record shape is intentionally loose: dict-like with string keys.
@@ -111,6 +147,46 @@ class Extractor(Protocol):
 
 
 @runtime_checkable
+class FileExtractor(Protocol):
+    """
+    File-level extractor that consumes FileItem objects and yields records.
+    """
+
+    def extract(
+        self,
+        item: FileItem,
+        *,
+        config: "RepocapsuleConfig | FileProcessingConfig",
+        context: Optional[RepoContext] = None,
+    ) -> Iterable[Record]:
+        ...
+
+
+@runtime_checkable
+class StreamingExtractor(Protocol):
+    """
+    Optional extension for extractors that can consume byte streams.
+
+    Streaming extractors can avoid materializing the full file payload when
+    running inside a thread-friendly pipeline that can reopen the underlying
+    source (e.g., local files). The default pipeline only attempts this path
+    when executor_kind == "thread" and the FileItem is marked streamable with
+    a valid origin_path.
+    """
+
+    name: Optional[str]  # type: ignore[assignment]
+
+    def extract_stream(
+        self,
+        *,
+        stream: IO[bytes],
+        path: str,
+        context: Optional[RepoContext] = None,
+    ) -> Optional[Iterable[Record]]:
+        ...
+
+
+@runtime_checkable
 class Sink(Protocol):
     """
     A destination for records (e.g., JSONL writer, prompt-text writer, Parquet).
@@ -129,11 +205,27 @@ class Sink(Protocol):
         """Flush and free resources. Must not raise on repeated calls."""
 
 
+@runtime_checkable
+class QualityScorer(Protocol):
+    """
+    Minimal contract for quality scorers used in inline or post-processing modes.
+    """
+
+    def score_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return per-record QC metrics."""
+
+    def score_jsonl_path(self, path: str) -> Iterable[Dict[str, Any]]:
+        """Iterate QC rows for every record within a JSONL file."""
+
+
 __all__ = [
     "FileItem",
     "RepoContext",
     "Record",
     "Source",
     "Extractor",
+    "FileExtractor",
+    "StreamingExtractor",
     "Sink",
+    "QualityScorer",
 ]
