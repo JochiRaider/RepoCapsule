@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple, TYPE_CHECKING
 import hashlib
 
 from .chunk import count_tokens
@@ -20,6 +20,14 @@ __all__ = [
     "is_code_file",
     "sha256_text",
     "build_record",
+    "RecordMeta",
+    "RunSummaryMeta",
+    "RunHeaderMeta",
+    "QCSummaryMeta",
+    "build_run_header_record",
+    "ensure_meta_dict",
+    "merge_meta_defaults",
+    "is_summary_record",
 ]
 
 # -----------------------
@@ -163,6 +171,212 @@ def sha256_text(text: str) -> str:
 
 
 # -----------------------
+# Metadata helpers
+# -----------------------
+
+RECORD_META_SCHEMA_VERSION = "1"
+SUMMARY_META_SCHEMA_VERSION = "1"
+
+# Canonical record meta fields used across the pipeline. Additional analyzer-specific
+# metadata should be stored under ``meta["extra"]`` so downstream consumers can
+# distinguish between core attributes and optional enrichments.
+STANDARD_META_FIELDS: set[str] = {
+    "kind",
+    "source",
+    "repo",
+    "path",
+    "license",
+    "lang",
+    "chunk_id",
+    "n_chunks",
+    "encoding",
+    "had_replacement",
+    "sha256",
+    "approx_tokens",
+    "tokens",
+    "bytes",
+    "file_bytes",
+    "truncated_bytes",
+    "schema_version",
+}
+# Field overview:
+#   - ``source`` → canonical dataset or repository URL.
+#   - ``repo``   → repo identifier (e.g., "owner/name").
+#   - ``lang``   → human-readable language label for the chunk.
+#   - ``tokens`` / ``approx_tokens`` → exact vs estimated token counts.
+#   - ``sha256`` → content hash of the chunk text.
+#   - ``file_bytes`` / ``truncated_bytes`` → original file sizing info.
+# Any other analyzer metadata should flow through ``RecordMeta.extra``.
+# QC scorers populate a few additional meta keys; documenting them here keeps the
+# schema discoverable for downstream tooling.
+QC_META_FIELDS: set[str] = {
+    "qc_score",
+    "qc_decision",
+    "qc_drop_reason",
+    "near_dup",
+    "dup_family_id",
+    "dup_family_size",
+    "qc_reason",
+}
+# QC scorers may add additional metadata, but these are the canonical keys used by
+# :class:`InlineQCController` and post-QC summaries.
+
+
+def _meta_to_dict(obj: Any) -> Dict[str, Any]:
+    """Flatten dataclass fields plus extras, skipping None values."""
+    out: Dict[str, Any] = {}
+    if obj is None:
+        return out
+    for f in fields(obj):
+        name = f.name
+        if name == "extra":
+            continue
+        value = getattr(obj, name)
+        if value is not None:
+            out[name] = value
+    extra = getattr(obj, "extra", None)
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value is None or key in out:
+                continue
+            out[key] = value
+    return out
+
+
+@dataclass(slots=True)
+class RecordMeta:
+    """
+    Metadata for normal content records (code/docs/logs/etc).
+
+    `kind` reflects the coarse file type: 'code' or 'doc'.
+    `file_bytes` captures the original source size, while `bytes` reflects the
+    processed chunk length (UTF-8). `truncated_bytes` represents bytes omitted
+    from the source due to prefix/decoder caps and is repeated across chunks.
+    """
+
+    kind: str = "code"
+    source: Optional[str] = None
+    repo: Optional[str] = None
+    path: Optional[str] = None
+    license: Optional[str] = None
+    lang: Optional[str] = None
+    chunk_id: int = 1
+    n_chunks: int = 1
+    encoding: str = "utf-8"
+    had_replacement: bool = False
+    sha256: Optional[str] = None
+    approx_tokens: Optional[int] = None
+    tokens: Optional[int] = None
+    bytes: Optional[int] = None
+    file_bytes: Optional[int] = None
+    truncated_bytes: Optional[int] = None
+    schema_version: str = RECORD_META_SCHEMA_VERSION
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _meta_to_dict(self)
+
+    @classmethod
+    def from_seed(
+        cls,
+        seed: Optional[Mapping[str, Any]] = None,
+        *,
+        kind: Optional[str] = None,
+        **overrides: Any,
+    ) -> "RecordMeta":
+        seed = seed or {}
+        data = dict(seed)
+        if kind is not None:
+            data["kind"] = kind
+        data.update(overrides)
+        field_names = {f.name for f in fields(cls)}
+        extra: Dict[str, Any] = {}
+        for key in list(data.keys()):
+            if key not in field_names:
+                value = data.pop(key)
+                if value is not None:
+                    extra.setdefault(key, value)
+        base_extra = data.get("extra")
+        if isinstance(base_extra, dict):
+            merged_extra = dict(base_extra)
+            for key, value in extra.items():
+                merged_extra.setdefault(key, value)
+        else:
+            merged_extra = extra
+        data["extra"] = merged_extra
+        data.setdefault("schema_version", RECORD_META_SCHEMA_VERSION)
+        return cls(**data)
+
+
+@dataclass(slots=True)
+class RunSummaryMeta:
+    """Metadata footer for runs; expects config to come from RepocapsuleConfig.to_dict()."""
+    kind: str = "run_summary"
+    schema_version: str = SUMMARY_META_SCHEMA_VERSION
+    config: Dict[str, Any] = field(default_factory=dict)
+    stats: Dict[str, Any] = field(default_factory=dict)
+    qc_summary: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _meta_to_dict(self)
+
+
+@dataclass(slots=True)
+class QCSummaryMeta:
+    kind: str = "qc_summary"
+    schema_version: str = SUMMARY_META_SCHEMA_VERSION
+    summary: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _meta_to_dict(self)
+
+
+@dataclass(slots=True)
+class RunHeaderMeta:
+    kind: str = "run_header"
+    schema_version: str = SUMMARY_META_SCHEMA_VERSION
+    config: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _meta_to_dict(self)
+
+
+def ensure_meta_dict(record: MutableMapping[str, Any]) -> Dict[str, Any]:
+    """Return record['meta'] as a dict, creating an empty one if needed."""
+    meta = record.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        record["meta"] = meta
+    return meta
+
+
+def merge_meta_defaults(record: MutableMapping[str, Any], defaults: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure a record has a meta dict and fill in default values without clobbering existing entries.
+    """
+    meta = ensure_meta_dict(record)
+    for key, value in defaults.items():
+        if key in meta or value is None:
+            continue
+        meta[key] = value
+    return meta
+
+
+def is_summary_record(record: Mapping[str, Any]) -> bool:
+    """Return True if the record appears to be a summary entry."""
+    meta = record.get("meta") if isinstance(record, Mapping) else None
+    if not isinstance(meta, dict):
+        return False
+    kind = meta.get("kind")
+    return kind in {"run_summary", "qc_summary"}
+
+
+# -----------------------
 # Record assembly
 # -----------------------
 
@@ -181,6 +395,9 @@ def build_record(
     extra_meta: Optional[Dict[str, object]] = None,
     langcfg: LanguageConfig | None = None,
     tokens: Optional[int] = None,
+    meta: Optional[RecordMeta | Mapping[str, Any]] = None,
+    file_bytes: Optional[int] = None,
+    truncated_bytes: Optional[int] = None,
 ) -> Dict[str, object]:
     """Create a canonical JSONL record matching the requested schema.
 
@@ -199,9 +416,15 @@ def build_record(
         "had_replacement": false,
         "sha256": "....",
         "tokens": 1234,
-        "bytes": 5678
+        "bytes": 5678,
+        "file_bytes": 10240,
+        "truncated_bytes": 4600
       }
     }
+
+    Standard metadata keys are cataloged in :data:`STANDARD_META_FIELDS`
+    (core record fields) and :data:`QC_META_FIELDS` (quality-scoring enrichments).
+    Additional analyzer-specific keys should be stored under ``meta["extra"]``.
     """
     rp = rel_path.replace("\\", "/")
 
@@ -233,35 +456,90 @@ def build_record(
 
     # Compute byte length and token estimate (approximate by default)
     bcount = len(text.encode("utf-8", "strict"))
-    approx_tokens = tokens if tokens is not None else count_tokens(text, None, "code" if kind == "code" else "doc")
+    approx_tokens = count_tokens(text, None, "code" if kind == "code" else "doc")
+    token_value = tokens if tokens is not None else approx_tokens
+
+    chunk_id_val = int(chunk_id) if chunk_id is not None else 1
+    n_chunks_val = int(n_chunks) if n_chunks is not None else 1
+
+    source_url = repo_url or (f"https://github.com/{repo_full_name}" if repo_full_name else None)
+
+    seed: Optional[Mapping[str, Any]]
+    if isinstance(meta, RecordMeta):
+        seed = meta.to_dict()
+    else:
+        seed = meta
+
+    meta_obj = RecordMeta.from_seed(
+        seed,
+        kind=kind,
+        source=source_url,
+        repo=repo_full_name,
+        path=rp,
+        license=license_id,
+        lang=lang,
+        chunk_id=chunk_id_val,
+        n_chunks=n_chunks_val,
+        encoding=encoding,
+        had_replacement=bool(had_replacement),
+        sha256=sha256_text(text),
+        approx_tokens=approx_tokens,
+        tokens=token_value,
+        bytes=bcount,
+        file_bytes=file_bytes,
+        truncated_bytes=truncated_bytes,
+    )
+
+    if extra_meta:
+        record_fields = {f.name for f in fields(RecordMeta)}
+        for key, value in extra_meta.items():
+            if key in record_fields or value is None:
+                continue
+            meta_obj.extra.setdefault(key, value)
 
     record = {
         "text": text,
-        "meta": {
-            "source": repo_url or (f"https://github.com/{repo_full_name}" if repo_full_name else None),
-            "repo": repo_full_name,
-            "path": rp,
-            "license": license_id,
-            "lang": lang,
-            "chunk_id": int(chunk_id or 1),
-            "n_chunks": int(n_chunks or 1),
-            "encoding": encoding,
-            "had_replacement": bool(had_replacement),
-            "sha256": sha256_text(text),
-            "tokens": approx_tokens,  # retained for backward compatibility (approximate)
-            "approx_tokens": approx_tokens,
-            "bytes": bcount,
-        },
+        "meta": meta_obj.to_dict(),
     }
-
-    # Drop None fields for cleanliness
-    record["meta"] = {k: v for k, v in record["meta"].items() if v is not None}
-
-    # Extra metadata (non-conflicting only)
-    if extra_meta:
-        for k2, v2 in extra_meta.items():
-            if k2 in record["meta"]:
-                continue
-            record["meta"][k2] = v2
-
     return record
+# -----------------------
+# Run header helper
+# -----------------------
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .config import RepocapsuleConfig
+
+
+def build_run_header_record(config: "RepocapsuleConfig") -> Dict[str, Any]:
+    """
+    Build a run_header record describing the configuration and metadata at start of a run.
+    """
+
+    meta = RunHeaderMeta(
+        config=config.to_dict(),
+        metadata=config.metadata.to_dict(),
+    )
+    return {"text": "", "meta": meta.to_dict()}
+
+
+def best_effort_record_path(record: Mapping[str, Any]) -> str:
+    """
+    Return a human-friendly path/identifier for a record for logging/QC.
+
+    Prefers meta['path'], then record['path'], then falls back to doc_id/origin_path,
+    otherwise returns "<unknown>".
+    """
+    if not isinstance(record, Mapping):
+        return "<unknown>"
+    meta = record.get("meta")
+    if isinstance(meta, Mapping):
+        path_val = meta.get("path")
+        if isinstance(path_val, str) and path_val:
+            return path_val
+        doc_id = meta.get("doc_id") or meta.get("chunk_id")
+        if isinstance(doc_id, str) and doc_id:
+            return doc_id
+    path_val = record.get("path") or record.get("origin_path")
+    if isinstance(path_val, str) and path_val:
+        return path_val
+    return "<unknown>"
