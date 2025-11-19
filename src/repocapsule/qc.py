@@ -47,6 +47,7 @@ class JSONLQualityScorer:
         minhash_jaccard_thresh: float = 0.82,
         enable_gopher: bool = True,
         gopher_weight: float = 0.10,
+        heuristics: object | None = None,
     ):
         self.lm: Optional[PerplexityModel] = None
         if lm_model_id:
@@ -74,6 +75,7 @@ class JSONLQualityScorer:
         self.enable_gopher = bool(enable_gopher)
         self.gopher_weight = float(gopher_weight)
         self.sim_seen: deque[tuple[int, str]] = deque(maxlen=128)
+        self.heuristics = heuristics
 
     def score_record(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         text = rec.get("text", "")
@@ -83,12 +85,12 @@ class JSONLQualityScorer:
         doc_id = str(meta.get("sha256") or hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest())
 
         N = int(meta.get("tokens") or approx_tokens(text))
-        Tlo, Thi = target_band(lang_l)
+        Tlo, Thi = target_band(lang_l, heuristics=self.heuristics)
         length_ok = 1.0 if Tlo <= N <= Thi else max(0.0, 1.0 - abs(N - ((Tlo + Thi) // 2)) / max(1, Thi))
 
         ascii_r = ascii_ratio(text)
-        rep = repetition_rate(text)
-        comp = code_complexity(text)
+        rep = repetition_rate(text, heuristics=self.heuristics)
+        comp = code_complexity(text, heuristics=self.heuristics)
         p_ok = parse_ok(text, lang)
 
         sh = simhash64(text)

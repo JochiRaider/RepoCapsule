@@ -22,7 +22,7 @@ from .factories import (
 )
 from .interfaces import RepoContext
 from .licenses import detect_license_in_tree, apply_license_to_context
-from .pipeline import process_items_parallel, PipelineEngine
+from .pipeline import process_items_parallel, PipelineEngine, _infer_executor_kind
 from .githubio import get_repo_info, parse_github_url
 from .log import get_logger
 from .qc_controller import QCSummaryTracker, summarize_qc_rows
@@ -277,6 +277,8 @@ def _resolve_qc_post_concurrency(cfg: RepocapsuleConfig) -> Tuple[int, int, str]
         window = max_workers * 4
 
     kind = (qc.post_executor_kind or pc.executor_kind or "thread").strip().lower()
+    if kind == "auto":
+        kind = _infer_executor_kind(cfg)
     if kind not in {"thread", "process"}:
         kind = "thread"
     return max_workers, window, kind

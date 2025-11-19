@@ -1,228 +1,346 @@
-# decode.py
+# convert.py
 # SPDX-License-Identifier: MIT
-
 from __future__ import annotations
 
+import io
 from pathlib import Path
-from typing import Optional
-from dataclasses import dataclass
-import re, unicodedata as _ud
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from .config import RepocapsuleConfig, FileProcessingConfig
+from .chunk import ChunkPolicy, iter_chunk_dicts
+from .decode import decode_bytes
+from .factories import UnsupportedBinary
+from .fs import read_file_prefix
+from .interfaces import FileExtractor, FileItem, RepoContext, Record, StreamingExtractor
 from .log import get_logger
+from .records import build_record
+
+ConfigForRecords = RepocapsuleConfig | FileProcessingConfig
+
+
+def _get_streaming_extractor(config: ConfigForRecords) -> Optional[StreamingExtractor]:
+    """
+    Return the pipeline file_extractor if it also supports the StreamingExtractor protocol.
+    """
+
+    pipeline_cfg = getattr(config, "pipeline", None)
+    if pipeline_cfg is None:
+        return None
+    extractor = getattr(pipeline_cfg, "file_extractor", None)
+    if extractor is None:
+        return None
+    return extractor if isinstance(extractor, StreamingExtractor) else None
+
+
+class _LimitedStream(io.BufferedReader):
+    """
+    Buffered reader that enforces a hard byte limit on read() calls.
+    """
+
+    def __init__(self, raw: io.BufferedIOBase, limit: int):
+        super().__init__(raw)
+        self._remaining = max(0, int(limit))
+
+    def read(self, size: int = -1) -> bytes:  # type: ignore[override]
+        if self._remaining <= 0:
+            return b""
+        if size < 0 or size > self._remaining:
+            size = self._remaining
+        chunk = super().read(size)
+        self._remaining -= len(chunk)
+        return chunk
 
 __all__ = [
-    "decode_bytes",            # public API
-    "read_text",               # returns Decoded
+    "make_records_for_file",
+    "make_records_from_bytes",
+    "iter_records_for_file",
+    "iter_records_from_bytes",
+    "iter_records_from_file_item",
+    "DefaultExtractor",
 ]
-
-@dataclass(slots=True, frozen=True)
-class DecodedText:
-    text: str
-    encoding: str
-    had_replacement: bool
 
 log = get_logger(__name__)
 
-# -----------------------------------------
-# Encoding helpers: BOM + UTF-16/32 heuristics
-# -----------------------------------------
+Sniff = Callable[[bytes, str], bool]
+BytesHandler = Callable[
+    [bytes, str, Optional[RepoContext], Optional[ChunkPolicy]],
+    Optional[Iterable[Record]],
+]
 
-_BOMS: tuple[tuple[bytes, str], ...] = (
-    (b"\xEF\xBB\xBF", "utf-8-sig"),
-    (b"\xFE\xFF", "utf-16-be"),
-    (b"\xFF\xFE", "utf-16-le"),
-    (b"\x00\x00\xFE\xFF", "utf-32-be"),
-    (b"\xFF\xFE\x00\x00", "utf-32-le"),
-)
+# ---------------------------------------------------------------------------
+# Record creation for a single file
+# ---------------------------------------------------------------------------
 
+# Shape of the callable adapter the pipeline passes into this module
+# (it wraps interfaces.Extractor.extract and returns an Iterable[Record])
+ExtractorFn = Callable[[str, str], Optional[Iterable[Record]]]
 
-def _detect_bom(data: bytes) -> Optional[str]:
-    for sig, enc in _BOMS:
-        if data.startswith(sig):
-            return enc
-    return None
-
-
-def _guess_utf16_endian_from_nuls(sample: bytes) -> Optional[str]:
-    """Return 'utf-16-le' or 'utf-16-be' if NUL distribution strongly hints it.
-
-    Heuristic: in ASCII-heavy UTF-16 text, one byte of each 2-byte unit is NUL.
-    Count NULs at even vs odd offsets in a window; prefer the side with more
-    NULs if significantly higher.
-    """
-    if not sample:
-        return None
-    even_nuls = sum(1 for i in range(0, len(sample), 2) if sample[i] == 0)
-    odd_nuls = sum(1 for i in range(1, len(sample), 2) if sample[i] == 0)
-    total_nuls = even_nuls + odd_nuls
-    if total_nuls < max(4, len(sample) // 64):  # need a few to be confident
-        return None
-    if even_nuls > odd_nuls * 2:
-        return "utf-16-be"  # 00 xx 00 xx ...
-    if odd_nuls > even_nuls * 2:
-        return "utf-16-le"  # xx 00 xx 00 ...
-    return None
+_MD_EXTS = {".md", ".mdx", ".markdown"}
+_RST_EXTS = {".rst"}
+_DOC_EXTS = _MD_EXTS | _RST_EXTS | {".adoc", ".txt"}
 
 
-# ----------------------
-# Unicode cleanup helpers
-# ----------------------
-
-_ZERO_WIDTH = {
-    0x200B,  # ZERO WIDTH SPACE
-    0x200C,  # ZERO WIDTH NON-JOINER
-    0x200D,  # ZERO WIDTH JOINER
-    0x2060,  # WORD JOINER (replacement for ZWNBSP)
-    0xFEFF,  # ZERO WIDTH NO-BREAK SPACE (BOM when leading)
-}
-
-
-def _normalize_newlines(s: str) -> str:
-    # Normalize CRLF and CR-only to LF
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    return s
+def _infer_mode_and_fmt(rel_path: str) -> Tuple[str, Optional[str]]:
+    """Return (mode, fmt) from filename."""
+    ext = Path(rel_path).suffix.lower()
+    if ext in _MD_EXTS:
+        return "doc", "md"
+    if ext in _RST_EXTS:
+        return "doc", "rst"
+    if ext in _DOC_EXTS:
+        return "doc", None
+    return "code", None
 
 
-def _strip_unsafe_controls(s: str) -> str:
-    # Keep TAB, LF, and (already normalized) no CR; drop other C0/C1 controls.
-    return "".join(
-        ch for ch in s
-        if (ch == "\n" or ch == "\t" or _ud.category(ch)[0] != "C") and ord(ch) not in _ZERO_WIDTH
+# --- Public entrypoint the pipeline can call ---
+
+def make_records_for_file(
+    *,
+    text: str,
+    rel_path: str,
+    config: ConfigForRecords,
+    context: Optional[RepoContext],
+    encoding: str,
+    had_replacement: bool,
+    file_bytes: int | None = None,
+    truncated_bytes: int | None = None,
+) -> List[Dict[str, object]]:
+    """Materialize the record iterator for a decoded file into a list."""
+    return list(
+        iter_records_for_file(
+            text=text,
+            rel_path=rel_path,
+            config=config,
+            context=context,
+            encoding=encoding,
+            had_replacement=had_replacement,
+            file_bytes=file_bytes,
+            truncated_bytes=truncated_bytes,
+        )
     )
 
 
-def _unicode_normalize(s: str, *, form: str = "NFC") -> str:
-    try:
-        return _ud.normalize(form, s)
-    except Exception:
-        return s
+def iter_records_for_file(
+    *,
+    text: str,
+    rel_path: str,
+    config: ConfigForRecords,
+    context: Optional[RepoContext],
+    encoding: str,
+    had_replacement: bool,
+    file_bytes: int | None = None,
+    truncated_bytes: int | None = None,
+) -> Iterator[Dict[str, object]]:
+    """Yield chunk records followed by extractor records for a decoded file."""
+    cfg = config
+    extractor_recs: List[Dict[str, object]] = []
+    context_meta = (context.as_meta_seed() or None) if context else None
+    if cfg.pipeline.extractors:
+        for extractor in cfg.pipeline.extractors:
+            try:
+                out = extractor.extract(text=text, path=rel_path, context=context)
+            except Exception as exc:
+                log.warning(
+                    "Extractor %s failed for %s: %s",
+                    getattr(extractor, "name", extractor),
+                    rel_path,
+                    exc,
+                )
+                continue
+            if not out:
+                continue
+            extractor_recs.extend(dict(rec) for rec in out)
+
+    mode, fmt = _infer_mode_and_fmt(rel_path)
+    chunk_dicts = list(
+        iter_chunk_dicts(
+            text,
+            mode=mode,
+            fmt=fmt,
+            policy=cfg.chunk.policy,
+            tokenizer_name=cfg.chunk.tokenizer_name,
+        )
+    )
+    total_chunks = len(chunk_dicts)
+
+    for idx, chunk in enumerate(chunk_dicts, start=1):
+        yield build_record(
+            text=chunk.get("text", ""),
+            rel_path=rel_path,
+            repo_full_name=(context.repo_full_name if context else None),
+            repo_url=(context.repo_url if context else None),
+            license_id=(context.license_id if context else None),
+            encoding=encoding,
+            had_replacement=had_replacement,
+            chunk_id=idx,
+            n_chunks=total_chunks,
+            lang=chunk.get("lang") if cfg.chunk.attach_language_metadata else None,
+            tokens=chunk.get("n_tokens"),
+            extra_meta=context_meta,
+            file_bytes=file_bytes,
+            truncated_bytes=truncated_bytes,
+        )
+
+    if extractor_recs and context_meta:
+        for rec in extractor_recs:
+            meta = rec.get("meta")
+            if isinstance(meta, dict):
+                for key, value in context_meta.items():
+                    meta.setdefault(key, value)
+
+    for rec in extractor_recs:
+        yield rec
 
 
-# ----------------------
-# Mojibake repair helpers
-# ----------------------
-
-# Quick check for typical UTF-8-as-cp1252 sequences (e.g., 'Ã©', 'â€™', 'Â').
-_MOJI_REGEX = re.compile(r"[\u00C0-\u00FF][\u0080-\u00FF]|Ã.|â.|Â|Â\s|\ufffd")
-
-
-def _mojibake_score(s: str) -> int:
-    return len(_MOJI_REGEX.findall(s))
-
-
-def _maybe_repair_cp1252_utf8(text_cp1252: str) -> str:
-    """Attempt to repair a string that likely came from UTF-8 bytes
-    mis-decoded as cp1252. If repair improves the mojibake score, return it.
-    """
-    try:
-        raw = text_cp1252.encode("cp1252", errors="ignore")
-        fixed = raw.decode("utf-8", errors="strict")
-    except Exception:
-        return text_cp1252
-    # Accept the repair only if it *reduces* the mojibake noise.
-    return fixed if _mojibake_score(fixed) * 3 < max(1, _mojibake_score(text_cp1252)) else text_cp1252
-
-
-# ------------------------
-# Core decoding entrypoints
-# ------------------------
-
-def decode_bytes(
+def iter_records_from_bytes(
     data: bytes,
+    rel_path: str,
     *,
-    normalize: Optional[str] = "NFC",
-    strip_controls: bool = True,
-    fix_mojibake: bool = True,
-) -> DecodedText:
-    """Decode bytes and return DecodedText(text, encoding, had_replacement).
-    Strategy:
-      1) Honor BOMs for UTF-8/16/32 when present (utf-8-sig skips the BOM on decode).
-      2) Try UTF-8 (strict). If it fails, probe UTF-16 endianness by NUL patterns.
-      3) Fallback to cp1252 (strict), else latin-1; optionally repair UTF-8-as-cp1252.
-      4) Normalize newlines, strip unsafe controls, and apply Unicode normalization.
-    """
-    if not data:
-        return DecodedText("", "utf-8", False)
+    config: ConfigForRecords,
+    context: Optional[RepoContext],
+    file_size: int | None = None,
+) -> Iterator[Dict[str, object]]:
+    cfg = config
+    handlers = list(cfg.pipeline.bytes_handlers)
+    for sniff, handler in handlers:
+        if sniff(data, rel_path):
+            try:
+                records = handler(data, rel_path, context, cfg.chunk.policy)
+            except UnsupportedBinary as e:
+                log.info("Skipping unsupported binary for %s: %s", rel_path, e)
+                records = None
+            if records:
+                yield from records
+                return
 
-    # 1) BOM-driven decode
-    enc = _detect_bom(data)
-    if enc:
-        try:
-            # For utf-8-sig, BOM is automatically stripped.
-            text = data.decode(enc, errors="strict")
-            text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-            return DecodedText(text, enc, "\ufffd" in text)
-        except Exception:
-            pass  # fall through
+    max_bytes = cfg.decode.max_bytes_per_file
+    if max_bytes is not None and len(data) > max_bytes:
+        data = data[:max_bytes]
+    processed_len = len(data)
+    file_bytes = file_size if file_size is not None else processed_len
+    truncated_bytes = None
+    if file_bytes is not None and file_bytes > processed_len:
+        truncated_bytes = file_bytes - processed_len
+        log.debug(
+            "Truncated %s: file_bytes=%s used_bytes=%s", rel_path, file_bytes, processed_len
+        )
 
-    # 2) UTF-8 first
-    try:
-        text = data.decode("utf-8", errors="strict")
-        text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-        return DecodedText(text, "utf-8", "\ufffd" in text)
-    except UnicodeDecodeError:
-        pass
-
-    # 2b) Heuristic UTF-16 guess (no BOM)
-    guess = _guess_utf16_endian_from_nuls(data[:4096])
-    if guess:
-        try:
-            text = data.decode(guess, errors="strict")
-            text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-            return DecodedText(text, guess, "\ufffd" in text)
-        except Exception:
-            pass
-
-    # 3) cp1252 fallback (always succeeds), with optional mojibake repair
-    try:
-        text1252 = data.decode("cp1252", errors="strict"); enc_used = "cp1252"
-    except Exception:
-        # As a last resort, latin-1 (will never fail)
-        text1252 = data.decode("latin-1", errors="replace"); enc_used = "latin-1"
-        
-    if fix_mojibake:
-        text1252 = _maybe_repair_cp1252_utf8(text1252)
-
-    text = _postprocess(text1252, normalize=normalize, strip_controls=strip_controls)
-    return DecodedText(text, enc_used, "\ufffd" in text)
-
-def _postprocess(s: str, *, normalize: Optional[str], strip_controls: bool) -> str:
-    s = _normalize_newlines(s)
-    if strip_controls:
-        s = _strip_unsafe_controls(s)
-    if normalize:
-        s = _unicode_normalize(s, form=normalize)
-    return s
-
-
-def read_text(
-    path: str | bytes | Path,
-    *,
-    max_bytes: Optional[int] = None,
-    normalize: Optional[str] = "NFC",
-    strip_controls: bool = True,
-    fix_mojibake: bool = True,
-) -> str:
-    """Read file as bytes and decodes to a text string.
-
-    Args:
-        path: file path
-        max_bytes: if provided, read at most this many bytes (useful for sampling)
-        normalize: Unicode normalization form (e.g., 'NFC', 'NFKC') or None
-        strip_controls: remove zero-width and control chars except TAB/LF
-        fix_mojibake: attempt to repair common UTF-8-as-cp1252 mojibake
-    """
-    p = Path(path)
-    try:
-        with p.open("rb") as f:
-            data = f.read(max_bytes) if max_bytes else f.read()
-    except OSError as e:
-        log.warning("read_text: failed to read %s: %s", p, e)
-        return ""
     dec = decode_bytes(
         data,
-        normalize=normalize,
-        strip_controls=strip_controls,
-        fix_mojibake=fix_mojibake,
+        normalize=cfg.decode.normalize,
+        strip_controls=cfg.decode.strip_controls,
+        fix_mojibake=cfg.decode.fix_mojibake,
     )
-    return dec.text
+    yield from iter_records_for_file(
+        text=dec.text,
+        rel_path=rel_path,
+        config=cfg,
+        context=context,
+        encoding=dec.encoding,
+        had_replacement=dec.had_replacement,
+        file_bytes=file_bytes,
+        truncated_bytes=truncated_bytes,
+    )
+
+
+def make_records_from_bytes(
+    data: bytes,
+    rel_path: str,
+    *,
+    config: ConfigForRecords,
+    context: Optional[RepoContext],
+) -> List[Dict[str, object]]:
+    return list(
+        iter_records_from_bytes(
+            data,
+            rel_path,
+            config=config,
+            context=context,
+        )
+    )
+
+
+def iter_records_from_file_item(
+    item: FileItem,
+    *,
+    config: ConfigForRecords,
+    context: Optional[RepoContext],
+) -> Iterator[Dict[str, object]]:
+    cfg = config
+    data = getattr(item, "data", None)
+    file_size = getattr(item, "size", None)
+
+    pipeline_cfg = getattr(cfg, "pipeline", None)
+    exec_kind = "thread"
+    if pipeline_cfg is not None:
+        exec_kind = (getattr(pipeline_cfg, "executor_kind", "thread") or "thread").strip().lower()
+
+    streaming_extractor = _get_streaming_extractor(cfg)
+    if (
+        streaming_extractor is not None
+        and exec_kind == "thread"
+        and getattr(item, "streamable", False)
+        and item.origin_path
+    ):
+        origin = Path(item.origin_path)
+        max_bytes = cfg.decode.max_bytes_per_file
+        try:
+            with origin.open("rb") as raw:
+                if max_bytes is not None:
+                    stream: io.BufferedReader = _LimitedStream(raw, max_bytes)
+                else:
+                    stream = io.BufferedReader(raw)
+                rows = streaming_extractor.extract_stream(
+                    stream=stream,
+                    path=item.path,
+                    context=context,
+                )
+                if rows is not None:
+                    for row in rows:
+                        yield row
+                    return
+        except Exception as exc:
+            log.warning(
+                "Streaming extractor failed for %s; falling back to buffered decode (%s)",
+                item.path,
+                exc,
+            )
+
+    if data is not None:
+        yield from iter_records_from_bytes(
+            data,
+            item.path,
+            config=cfg,
+            context=context,
+            file_size=file_size,
+        )
+        return
+    if getattr(item, "streamable", False) and item.origin_path:
+        origin = Path(item.origin_path)
+        max_bytes = cfg.decode.max_bytes_per_file
+        try:
+            reopened, size = read_file_prefix(origin, max_bytes, file_size=file_size)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to reopen stream for {item.path}: {exc}") from exc
+        yield from iter_records_from_bytes(
+            reopened,
+            item.path,
+            config=cfg,
+            context=context,
+            file_size=size,
+        )
+        return
+    raise ValueError(f"FileItem {item.path!r} missing data and not streamable")
+
+
+class DefaultExtractor(FileExtractor):
+    """Fallback file-level extractor that reuses the built-in decoding/record flow."""
+
+    def extract(
+        self,
+        item: FileItem,
+        *,
+        config: ConfigForRecords,
+        context: Optional[RepoContext] = None,
+    ) -> Iterable[Dict[str, object]]:
+        return iter_records_from_file_item(item, config=config, context=context)

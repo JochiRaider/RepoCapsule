@@ -2,6 +2,13 @@
 from __future__ import annotations
 
 import json
+try:  # pragma: no cover - optional dependency
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        import tomli as tomllib  # type: ignore[assignment]
+    except Exception:  # pragma: no cover
+        tomllib = None  # type: ignore[assignment]
 from collections.abc import Sequence as ABCSequence
 from dataclasses import dataclass, field, replace, is_dataclass, fields
 from pathlib import Path
@@ -101,6 +108,10 @@ class GitHubSourceConfig:
 class PdfSourceConfig:
     """
     Settings for web PDF fetching; download_* controls concurrency for WebPdfListSource/WebPagePdfSource only.
+
+    download_executor_kind:
+        "thread" only; "process" is currently not supported for web downloads and will
+        fall back to "thread" with a warning.
     """
     timeout: int = 60
     max_pdf_bytes: int = 200 * 1024 * 1024  # Streaming cap; responses exceeding it are aborted.
@@ -149,7 +160,11 @@ class PipelineConfig:
 
     max_workers = 0 → auto (os.cpu_count or 1)
     submit_window = None → defaults to max_workers * 4
-    executor_kind ∈ {"thread", "process"}
+    executor_kind ∈ {"thread", "process", "auto"}
+      - "thread": good for I/O-heavy or small text/code workloads.
+      - "process": recommended for CPU-bound handlers such as PDF (pdfio) or EVTX (evtxio).
+      - "auto": let the pipeline choose based on configured sources/handlers (defaults to
+        threads for mostly text/code; switches to processes when PDF/EVTX-heavy).
 
     Where this applies:
     - main extraction pipeline (file decoding/chunking/sink writes)
@@ -165,7 +180,7 @@ class PipelineConfig:
     max_workers: int = 0
     submit_window: Optional[int] = None
     fail_fast: bool = False
-    executor_kind: str = "thread"
+    executor_kind: str = "auto"
 
 
 @dataclass(slots=True, frozen=True)
@@ -206,6 +221,16 @@ class SinkConfig:
 
 @dataclass(slots=True)
 class HttpConfig:
+    """
+    HTTP client settings used by higher-level helpers and factories.
+
+    - ``client`` can hold a pre-built SafeHttpClient instance. When set, it will be reused by
+      ``build_client()`` and passed to factories.
+    - ``as_global`` controls whether ``RepocapsuleConfig.prepared()`` installs this client as the
+      module-wide default via ``set_global_http_client``. For CLI-style one-shot runs, leaving this
+      True is convenient. For tests or long-lived processes, prefer ``as_global=False`` and pass the
+      client explicitly.
+    """
     timeout: float = 60.0
     max_redirects: int = 5
     allowed_redirect_suffixes: Tuple[str, ...] = ("github.com",)
@@ -230,6 +255,28 @@ class HttpConfig:
 # ---------------------------------------------------------------------------
 
 @dataclass(slots=True)
+class QCHeuristics:
+    """
+    Tunable thresholds/weights used by quality scoring. Defaults match existing hard-coded behavior.
+    """
+
+    target_code_min: int = 2000
+    target_code_max: int = 4000
+    target_log_min: int = 1000
+    target_log_max: int = 2000
+    target_text_min: int = 1500
+    target_text_max: int = 2000
+    target_other_min: int = 1000
+    target_other_max: int = 3000
+
+    repetition_k: int = 16
+
+    code_short_line_threshold: int = 60
+    code_punct_weight: float = 0.5
+    code_short_line_weight: float = 0.5
+
+
+@dataclass(slots=True)
 class QCConfig:
     """
     Configuration for quality scoring and gating.
@@ -248,6 +295,10 @@ class QCConfig:
     Concurrency:
     - ``parallel_post`` enables post-QC scoring via process_items_parallel.
     - ``post_*`` knobs override pipeline concurrency for post-QC; when None, they inherit from PipelineConfig.
+
+    heuristics:
+    Advanced tuning of QC heuristics (length bands, repetition window, code complexity weights). Most
+    users can ignore this unless they need to align scoring with specialized corpora.
     """
 
     enabled: bool = False
@@ -262,6 +313,7 @@ class QCConfig:
     post_executor_kind: Optional[str] = None
     post_max_workers: Optional[int] = None
     post_submit_window: Optional[int] = None
+    heuristics: "QCHeuristics" = field(default_factory=QCHeuristics)
 
     def normalize_mode(self) -> str:
         normalized = QCMode.normalize(self.mode)
@@ -274,6 +326,35 @@ class QCConfig:
             raise ValueError("QC enabled but mode is 'off'; disable qc.enabled or choose an active mode.")
         if self.enabled and mode in {QCMode.INLINE, QCMode.ADVISORY} and self.scorer is None:
             raise ValueError("Inline/advisory QC requires a scorer; set qc.scorer or install QC extras.")
+        h = self.heuristics or QCHeuristics()
+        if not isinstance(h, QCHeuristics):
+            try:
+                h = QCHeuristics(**dict(h))  # type: ignore[arg-type]
+            except Exception as exc:
+                raise TypeError(f"qc.heuristics must be QCHeuristics-compatible; got {type(self.heuristics).__name__}") from exc
+        self.heuristics = h
+        numeric_positive = [
+            ("target_code_min", h.target_code_min),
+            ("target_code_max", h.target_code_max),
+            ("target_log_min", h.target_log_min),
+            ("target_log_max", h.target_log_max),
+            ("target_text_min", h.target_text_min),
+            ("target_text_max", h.target_text_max),
+            ("target_other_min", h.target_other_min),
+            ("target_other_max", h.target_other_max),
+            ("repetition_k", h.repetition_k),
+            ("code_short_line_threshold", h.code_short_line_threshold),
+        ]
+        for name, value in numeric_positive:
+            if value <= 0:
+                raise ValueError(f"qc.heuristics.{name} must be positive; got {value}")
+        weight_fields = [
+            ("code_punct_weight", h.code_punct_weight),
+            ("code_short_line_weight", h.code_short_line_weight),
+        ]
+        for name, value in weight_fields:
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"qc.heuristics.{name} must be between 0 and 1; got {value}")
 
 
 @dataclass(slots=True)
@@ -398,6 +479,14 @@ class RepocapsuleConfig:
         return cfg
 
     def _prepare_http(self) -> None:
+        """
+        Normalize HTTP client wiring.
+
+        Installs ``self.http.client`` and, when ``as_global`` is True, registers it as the
+        process-wide default via ``safe_http.set_global_http_client``. Library callers that need
+        per-run isolation should set ``as_global=False`` and pass ``self.http.build_client()``
+        directly to factories instead of relying on globals.
+        """
         client = self.http.build_client()
         self.http.client = client
         if self.http.as_global:
@@ -477,8 +566,13 @@ class RepocapsuleConfig:
     def validate(self) -> None:
         self._validate_paths()
         self.qc.validate()
-        if self.pipeline.executor_kind not in {"thread", "process"}:
-            raise ValueError("pipeline.executor_kind must be 'thread' or 'process'.")
+        allowed = {"thread", "process", "auto"}
+        kind = (self.pipeline.executor_kind or "auto").strip().lower()
+        if kind not in allowed:
+            raise ValueError(
+                f"pipeline.executor_kind must be one of {sorted(allowed)}; got {self.pipeline.executor_kind!r}."
+            )
+        self.pipeline.executor_kind = kind
 
     def _validate_paths(self) -> None:
         meta = self.metadata
@@ -519,6 +613,40 @@ class RepocapsuleConfig:
     def from_json(cls: Type[T], path: Path | str) -> T:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls.from_dict(payload)
+
+    @classmethod
+    def from_toml(cls: Type[T], path: Path | str) -> T:
+        """
+        Load a RepocapsuleConfig from a TOML file.
+
+        The TOML layout mirrors the structure of this dataclass: top-level tables like [decode],
+        [chunk], [pipeline], [sinks], [http], [qc], [logging], [metadata], and so on.
+        """
+        if tomllib is None:
+            raise RuntimeError(
+                "TOML support requires Python 3.11+ (tomllib) or installing the 'tomli' package."
+            )
+        path_obj = Path(path)
+        raw = path_obj.read_bytes()
+        data = tomllib.loads(raw.decode("utf-8"))
+
+        if not isinstance(data, Mapping):
+            raise TypeError(f"Top-level TOML document must be a mapping; got {type(data).__name__}.")
+
+        return cls.from_dict(data)
+
+
+def load_config_from_path(path: str | Path) -> RepocapsuleConfig:
+    """
+    Convenience loader that picks a parser based on file extension (.toml or .json).
+    """
+    p = Path(path)
+    suffix = p.suffix.lower()
+    if suffix == ".toml":
+        return RepocapsuleConfig.from_toml(p)
+    if suffix == ".json":
+        return RepocapsuleConfig.from_json(p)
+    raise ValueError(f"Unsupported config extension {p.suffix!r}; expected .toml or .json.")
 
 
 _SKIP_FIELDS: Dict[Type[Any], set[str]] = {

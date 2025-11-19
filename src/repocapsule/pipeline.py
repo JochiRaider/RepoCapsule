@@ -233,6 +233,70 @@ def _ext_key(path: str) -> str:
         return ""
 
 
+def _has_heavy_binary_handlers(cfg: RepocapsuleConfig) -> bool:
+    """Return True if the pipeline is configured with PDF/EVTX handlers."""
+    try:
+        handlers = cfg.pipeline.bytes_handlers
+    except Exception:
+        return False
+
+    for _sniff, handler in handlers:
+        name = getattr(handler, "__name__", "").lower()
+        mod = getattr(handler, "__module__", "").lower()
+        if name in {"handle_pdf", "handle_evtx"}:
+            return True
+        if "pdfio" in mod or "evtxio" in mod:
+            return True
+    return False
+
+
+def _has_heavy_sources(cfg: RepocapsuleConfig) -> bool:
+    """
+    Heuristic: consider the workload heavy when configured sources strongly suggest PDF/EVTX ingestion.
+    """
+    try:
+        src_cfg = cfg.sources
+    except Exception:
+        return False
+
+    try:
+        for src in src_cfg.sources:
+            cls_name = type(src).__name__.lower()
+            if "pdf" in cls_name or "evtx" in cls_name:
+                return True
+    except Exception:
+        pass
+
+    local_cfg = getattr(src_cfg, "local", None)
+    if local_cfg and getattr(local_cfg, "include_exts", None):
+        exts = {e.lower() for e in local_cfg.include_exts}
+        if ".pdf" in exts or ".evtx" in exts:
+            return True
+
+    gh_cfg = getattr(src_cfg, "github", None)
+    if gh_cfg and getattr(gh_cfg, "include_exts", None):
+        exts = {e.lower() for e in gh_cfg.include_exts}
+        if ".pdf" in exts or ".evtx" in exts:
+            return True
+
+    return False
+
+
+def _infer_executor_kind(cfg: RepocapsuleConfig) -> str:
+    """
+    Decide between 'thread' and 'process' for executor_kind='auto'.
+
+    Default to threads for typical text/code workloads; switch to processes when both
+    heavy binary handlers (pdfio/evtxio) and sources indicating PDF/EVTX ingestion are present.
+    """
+    heavy_handlers = _has_heavy_binary_handlers(cfg)
+    heavy_sources = _has_heavy_sources(cfg)
+
+    if heavy_handlers and heavy_sources:
+        return "process"
+    return "thread"
+
+
 def _resolve_pipeline_concurrency(cfg: RepocapsuleConfig) -> Tuple[int, int, str, bool]:
     """
     Normalize pipeline concurrency knobs (workers/window/executor-kind/fail-fast).
@@ -241,7 +305,12 @@ def _resolve_pipeline_concurrency(cfg: RepocapsuleConfig) -> Tuple[int, int, str
     max_workers = pc.max_workers or (os.cpu_count() or 1)
     max_workers = max(1, max_workers)
     window = pc.submit_window or (max_workers * 4)
-    kind = (pc.executor_kind or "thread").strip().lower()
+    raw_kind = (pc.executor_kind or "auto").strip().lower()
+    if raw_kind == "auto":
+        kind = _infer_executor_kind(cfg)
+    else:
+        kind = raw_kind
+
     if kind not in {"thread", "process"}:
         kind = "thread"
     fail_fast = bool(pc.fail_fast)

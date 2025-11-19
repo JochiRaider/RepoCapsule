@@ -1,5 +1,3 @@
-#qc_controller.py
-#
 """
 Helpers for inline QC execution and summary building.
 """
