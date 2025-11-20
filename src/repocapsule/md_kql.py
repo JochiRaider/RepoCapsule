@@ -348,6 +348,7 @@ class KqlFromMarkdownExtractor:
 
         cat = derive_category_from_rel(path)
         context_meta = (context.as_meta_seed() or None) if context else None
+        file_nlines = 0 if text == "" else text.count("\n") + 1
         out: List[Record] = []
         n = len(blocks)
         for i, b in enumerate(blocks, start=1):
@@ -366,6 +367,7 @@ class KqlFromMarkdownExtractor:
                 n_chunks=n,
                 lang="KQL",
                 extra_meta=extra_meta,
+                file_nlines=file_nlines,
             )
             out.append(rec)
         return out

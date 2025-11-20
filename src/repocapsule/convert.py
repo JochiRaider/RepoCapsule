@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 from .config import RepocapsuleConfig, FileProcessingConfig
 from .chunk import ChunkPolicy, iter_chunk_dicts
@@ -104,6 +106,8 @@ def make_records_for_file(
     had_replacement: bool,
     file_bytes: int | None = None,
     truncated_bytes: int | None = None,
+    source_url: Optional[str] = None,
+    source_domain: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     """Materialize the record iterator for a decoded file into a list."""
     return list(
@@ -116,6 +120,8 @@ def make_records_for_file(
             had_replacement=had_replacement,
             file_bytes=file_bytes,
             truncated_bytes=truncated_bytes,
+            source_url=source_url,
+            source_domain=source_domain,
         )
     )
 
@@ -130,11 +136,14 @@ def iter_records_for_file(
     had_replacement: bool,
     file_bytes: int | None = None,
     truncated_bytes: int | None = None,
+    source_url: Optional[str] = None,
+    source_domain: Optional[str] = None,
 ) -> Iterator[Dict[str, object]]:
     """Yield chunk records followed by extractor records for a decoded file."""
     cfg = config
     extractor_recs: List[Dict[str, object]] = []
     context_meta = (context.as_meta_seed() or None) if context else None
+    file_nlines = 0 if text == "" else text.count("\n") + 1
     if cfg.pipeline.extractors:
         for extractor in cfg.pipeline.extractors:
             try:
@@ -179,6 +188,9 @@ def iter_records_for_file(
             extra_meta=context_meta,
             file_bytes=file_bytes,
             truncated_bytes=truncated_bytes,
+            file_nlines=file_nlines,
+            url=source_url,
+            source_domain=source_domain,
         )
 
     if extractor_recs and context_meta:
@@ -199,13 +211,34 @@ def iter_records_from_bytes(
     config: ConfigForRecords,
     context: Optional[RepoContext],
     file_size: int | None = None,
+    source_url: Optional[str] = None,
+    source_domain: Optional[str] = None,
 ) -> Iterator[Dict[str, object]]:
     cfg = config
+    derived_domain = source_domain
+    if derived_domain is None and source_url:
+        try:
+            derived_domain = urlparse(source_url).hostname
+        except Exception:
+            derived_domain = None
+    ctx_with_source = context
+    if source_url or derived_domain:
+        extra: Dict[str, Any] = {}
+        if context and context.extra:
+            extra.update(context.extra)
+        if source_url:
+            extra.setdefault("url", source_url)
+        if derived_domain:
+            extra.setdefault("source_domain", derived_domain)
+        ctx_with_source = replace(
+            context or RepoContext(),
+            extra=extra,
+        )
     handlers = list(cfg.pipeline.bytes_handlers)
     for sniff, handler in handlers:
         if sniff(data, rel_path):
             try:
-                records = handler(data, rel_path, context, cfg.chunk.policy)
+                records = handler(data, rel_path, ctx_with_source, cfg.chunk.policy)
             except UnsupportedBinary as e:
                 log.info("Skipping unsupported binary for %s: %s", rel_path, e)
                 records = None
@@ -235,11 +268,13 @@ def iter_records_from_bytes(
         text=dec.text,
         rel_path=rel_path,
         config=cfg,
-        context=context,
+        context=ctx_with_source,
         encoding=dec.encoding,
         had_replacement=dec.had_replacement,
         file_bytes=file_bytes,
         truncated_bytes=truncated_bytes,
+        source_url=source_url,
+        source_domain=derived_domain,
     )
 
 
@@ -269,6 +304,17 @@ def iter_records_from_file_item(
     cfg = config
     data = getattr(item, "data", None)
     file_size = getattr(item, "size", None)
+    origin_url: Optional[str] = None
+    origin_domain: Optional[str] = None
+    if getattr(item, "origin_path", None):
+        try:
+            parsed = urlparse(str(item.origin_path))
+            if parsed.scheme in {"http", "https"}:
+                origin_url = str(item.origin_path)
+                origin_domain = parsed.hostname
+        except Exception:
+            origin_url = None
+            origin_domain = None
 
     pipeline_cfg = getattr(cfg, "pipeline", None)
     exec_kind = "thread"
@@ -313,6 +359,8 @@ def iter_records_from_file_item(
             config=cfg,
             context=context,
             file_size=file_size,
+            source_url=origin_url,
+            source_domain=origin_domain,
         )
         return
     if getattr(item, "streamable", False) and item.origin_path:
@@ -328,6 +376,8 @@ def iter_records_from_file_item(
             config=cfg,
             context=context,
             file_size=size,
+            source_url=origin_url,
+            source_domain=origin_domain,
         )
         return
     raise ValueError(f"FileItem {item.path!r} missing data and not streamable")

@@ -275,6 +275,15 @@ class QCHeuristics:
     code_punct_weight: float = 0.5
     code_short_line_weight: float = 0.5
 
+    # Advanced dedup tuning (Simhash + MinHash); override scorer defaults when set.
+    simhash_window: int = 128
+    simhash_hamm_thresh: int | None = None
+    enable_minhash: bool | None = None
+    minhash_perms: int | None = None
+    minhash_bands: int | None = None
+    minhash_shingle_k: int | None = None
+    minhash_jaccard_thresh: float | None = None
+
 
 @dataclass(slots=True)
 class QCConfig:
@@ -355,6 +364,8 @@ class QCConfig:
         for name, value in weight_fields:
             if not (0.0 <= value <= 1.0):
                 raise ValueError(f"qc.heuristics.{name} must be between 0 and 1; got {value}")
+        if h.simhash_window is not None and h.simhash_window <= 0:
+            raise ValueError(f"qc.heuristics.simhash_window must be positive; got {h.simhash_window}")
 
 
 @dataclass(slots=True)

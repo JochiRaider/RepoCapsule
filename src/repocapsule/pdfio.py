@@ -132,6 +132,8 @@ def extract_pdf_records(
         license_id=license_id,
     )
     ctx_seed = ctx.as_meta_seed() or None
+    url_hint = ctx_seed.get("url") if ctx_seed else None
+    domain_hint = ctx_seed.get("source_domain") if ctx_seed else None
 
     def _with_context_extra(extra: Dict[str, Any]) -> Dict[str, Any]:
         if ctx_seed:
@@ -162,6 +164,7 @@ def extract_pdf_records(
         except Exception:
             txt = ""
         pages_text.append(txt)
+    file_nlines = sum((t.count("\n") + 1 if t else 0) for t in pages_text) if pages_text else 0
 
     records: List[Dict[str, object]] = []
     if mode == "page":
@@ -176,7 +179,10 @@ def extract_pdf_records(
                     license_id=license_id,
                     chunk_id=i,
                     n_chunks=n,
+                    url=url_hint,
+                    source_domain=domain_hint,
                     extra_meta=_with_context_extra({"subkind": "pdf", "page": i, "n_pages": n, "pdf_meta": pdf_meta or None}),
+                    file_nlines=file_nlines,
                 )
             )
     else:
@@ -193,8 +199,11 @@ def extract_pdf_records(
                     license_id=license_id,
                     chunk_id=i,
                     n_chunks=n,
+                    url=url_hint,
+                    source_domain=domain_hint,
                     extra_meta=_with_context_extra({"subkind": "pdf", "pdf_meta": pdf_meta or None}),
                     tokens=ch.get("n_tokens"),
+                    file_nlines=file_nlines,
                 )
             )
 

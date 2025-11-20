@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple, TYPE_CHECKING
 import hashlib
 
@@ -15,7 +16,7 @@ __all__ = [
     "DOC_EXTS",
     "EXT_LANG",
     "LanguageConfig",
-    "DEFAULT_LANGCFG",    
+    "DEFAULT_LANGCFG",
     "guess_lang_from_path",
     "is_code_file",
     "sha256_text",
@@ -28,6 +29,7 @@ __all__ = [
     "ensure_meta_dict",
     "merge_meta_defaults",
     "is_summary_record",
+    "filter_qc_meta",
 ]
 
 # -----------------------
@@ -36,23 +38,74 @@ __all__ = [
 # note: Keep these lower-cased; compare on Path.suffix.lower().
 CODE_EXTS: set[str] = {
     # programming / scripting
-    ".py", ".pyw", ".py3", ".ipynb",
-    ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".bash", ".zsh",
-    ".c", ".h", ".cpp", ".hpp", ".cc", ".hh", ".cxx", ".hxx",
-    ".cs", ".java", ".kt", ".kts", ".scala", ".go", ".rs", ".swift",
-    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-    ".rb", ".php", ".pl", ".pm",
-    ".lua", ".r", ".jl",
-    ".sql", ".sparql",
+    ".py",
+    ".pyw",
+    ".py3",
+    ".ipynb",
+    ".ps1",
+    ".psm1",
+    ".psd1",
+    ".bat",
+    ".cmd",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".hh",
+    ".cxx",
+    ".hxx",
+    ".cs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".scala",
+    ".go",
+    ".rs",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".rb",
+    ".php",
+    ".pl",
+    ".pm",
+    ".lua",
+    ".r",
+    ".jl",
+    ".sql",
+    ".sparql",
     # config / structured (treated as code-ish for token ratios)
-    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg",
-    ".xml", ".xslt", ".evtx",
+    ".json",
+    ".jsonc",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".xml",
+    ".xslt",
+    ".evtx",
     # data / rules
-    ".yara", ".yar", ".sigma", ".ndjson", ".log",
+    ".yara",
+    ".yar",
+    ".sigma",
+    ".ndjson",
+    ".log",
 }
 
 DOC_EXTS: set[str] = {
-    ".md", ".mdx", ".rst", ".adoc", ".txt",
+    ".md",
+    ".mdx",
+    ".rst",
+    ".adoc",
+    ".txt",
 }
 
 # Language hints per extension (lower-case ext -> language tag)
@@ -117,7 +170,7 @@ EXT_LANG: Dict[str, str] = {
     ".rst": "restructuredtext",
     ".adoc": "asciidoc",
     ".txt": "text",
-    ".evtx":"windows-eventlog",
+    ".evtx": "windows-eventlog",
 }
 
 @dataclass
@@ -174,7 +227,7 @@ def sha256_text(text: str) -> str:
 # Metadata helpers
 # -----------------------
 
-RECORD_META_SCHEMA_VERSION = "1"
+RECORD_META_SCHEMA_VERSION = "2"  # bump when core schema fields change so downstream consumers can detect mixes
 SUMMARY_META_SCHEMA_VERSION = "1"
 
 # Canonical record meta fields used across the pipeline. Additional analyzer-specific
@@ -185,8 +238,13 @@ STANDARD_META_FIELDS: set[str] = {
     "source",
     "repo",
     "path",
+    "url",
+    "source_domain",
     "license",
     "lang",
+    "lang_score",
+    "perplexity",
+    "ppl_bucket",
     "chunk_id",
     "n_chunks",
     "encoding",
@@ -197,15 +255,17 @@ STANDARD_META_FIELDS: set[str] = {
     "bytes",
     "file_bytes",
     "truncated_bytes",
+    "nlines",
+    "file_nlines",
     "schema_version",
 }
 # Field overview:
-#   - ``source`` → canonical dataset or repository URL.
-#   - ``repo``   → repo identifier (e.g., "owner/name").
-#   - ``lang``   → human-readable language label for the chunk.
-#   - ``tokens`` / ``approx_tokens`` → exact vs estimated token counts.
-#   - ``sha256`` → content hash of the chunk text.
-#   - ``file_bytes`` / ``truncated_bytes`` → original file sizing info.
+#   - Identity / provenance: ``source``, ``repo``, ``path``, ``url``, ``source_domain``.
+#   - Content structure: ``bytes``, ``file_bytes``, ``truncated_bytes``, ``nlines``, ``file_nlines``.
+#   - Language & sampling: ``lang``, ``lang_score``, ``perplexity``, ``ppl_bucket``.
+#   - Chunking / processing: ``kind``, ``chunk_id``, ``n_chunks``, ``encoding``, ``had_replacement``.
+#   - Integrity & versioning: ``sha256``, ``schema_version``.
+#   - Token counts: ``tokens``, ``approx_tokens``.
 # Any other analyzer metadata should flow through ``RecordMeta.extra``.
 # QC scorers populate a few additional meta keys; documenting them here keeps the
 # schema discoverable for downstream tooling.
@@ -213,17 +273,47 @@ QC_META_FIELDS: set[str] = {
     "qc_score",
     "qc_decision",
     "qc_drop_reason",
+    "qc_reason",
     "near_dup",
     "dup_family_id",
     "dup_family_size",
-    "qc_reason",
+    "qc_version",
 }
-# QC scorers may add additional metadata, but these are the canonical keys used by
-# :class:`InlineQCController` and post-QC summaries.
+# QC scorers may add additional metadata, but these are the only QC keys that should
+# appear at the top level of ``record["meta"]``; all other QC signals belong in
+# ``meta["extra"]`` (see ``filter_qc_meta``).
+
+
+def filter_qc_meta(qc_result: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Partition a raw QC scorer result into (canonical_qc, qc_signals).
+
+    - canonical_qc → stable QC fields allowed at top-level ``record["meta"]`` (QC_META_FIELDS plus ``qc_score`` from ``score``).
+    - qc_signals  → everything else, intended for ``meta["extra"]["qc_signals"]``.
+    Tokens are skipped here so callers can handle them specially (e.g., populate approx/tokens).
+    """
+    canonical: Dict[str, Any] = {}
+    qc_signals: Dict[str, Any] = {}
+
+    for key, value in qc_result.items():
+        if key == "tokens":
+            continue
+        if key == "score":
+            if value is not None:
+                canonical["qc_score"] = value
+            continue
+        if key in QC_META_FIELDS:
+            canonical[key] = value
+            continue
+        qc_signals[key] = value
+    return canonical, qc_signals
 
 
 def _meta_to_dict(obj: Any) -> Dict[str, Any]:
-    """Flatten dataclass fields plus extras, skipping None values."""
+    """
+    Flatten dataclass fields (including core schema fields such as url/nlines/perplexity) plus extras,
+    skipping None values and preserving the rule that core fields win over ``extra`` entries.
+    """
     out: Dict[str, Any] = {}
     if obj is None:
         return out
@@ -258,8 +348,13 @@ class RecordMeta:
     source: Optional[str] = None
     repo: Optional[str] = None
     path: Optional[str] = None
+    url: Optional[str] = None
+    source_domain: Optional[str] = None
     license: Optional[str] = None
     lang: Optional[str] = None
+    lang_score: Optional[float] = None
+    perplexity: Optional[float] = None
+    ppl_bucket: Optional[str] = None
     chunk_id: int = 1
     n_chunks: int = 1
     encoding: str = "utf-8"
@@ -270,6 +365,8 @@ class RecordMeta:
     bytes: Optional[int] = None
     file_bytes: Optional[int] = None
     truncated_bytes: Optional[int] = None
+    nlines: Optional[int] = None
+    file_nlines: Optional[int] = None
     schema_version: str = RECORD_META_SCHEMA_VERSION
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -387,6 +484,8 @@ def build_record(
     repo_full_name: Optional[str] = None,  # e.g., "owner/repo"
     repo_url: Optional[str] = None,        # e.g., "https://github.com/owner/repo"
     license_id: Optional[str] = None,      # SPDX id like 'Apache-2.0'
+    url: Optional[str] = None,              # canonical file URL when available
+    source_domain: Optional[str] = None,    # hostname derived from URL/source
     lang: Optional[str] = None,            # language label (Title Case preferred)
     encoding: str = "utf-8",
     had_replacement: bool = False,
@@ -398,6 +497,7 @@ def build_record(
     meta: Optional[RecordMeta | Mapping[str, Any]] = None,
     file_bytes: Optional[int] = None,
     truncated_bytes: Optional[int] = None,
+    file_nlines: Optional[int] = None,
 ) -> Dict[str, object]:
     """Create a canonical JSONL record matching the requested schema.
 
@@ -456,13 +556,24 @@ def build_record(
 
     # Compute byte length and token estimate (approximate by default)
     bcount = len(text.encode("utf-8", "strict"))
-    approx_tokens = count_tokens(text, None, "code" if kind == "code" else "doc")
-    token_value = tokens if tokens is not None else approx_tokens
+    if tokens is not None:
+        approx_tokens = tokens
+        token_value = tokens
+    else:
+        approx_tokens = count_tokens(text, None, "code" if kind == "code" else "doc")
+        token_value = approx_tokens
+    nlines = 0 if text == "" else text.count("\n") + 1
 
     chunk_id_val = int(chunk_id) if chunk_id is not None else 1
     n_chunks_val = int(n_chunks) if n_chunks is not None else 1
 
     source_url = repo_url or (f"https://github.com/{repo_full_name}" if repo_full_name else None)
+    domain = source_domain
+    if domain is None and url:
+        try:
+            domain = urlparse(url).hostname
+        except Exception:
+            domain = None
 
     seed: Optional[Mapping[str, Any]]
     if isinstance(meta, RecordMeta):
@@ -476,6 +587,8 @@ def build_record(
         source=source_url,
         repo=repo_full_name,
         path=rp,
+        url=url,
+        source_domain=domain,
         license=license_id,
         lang=lang,
         chunk_id=chunk_id_val,
@@ -488,6 +601,8 @@ def build_record(
         bytes=bcount,
         file_bytes=file_bytes,
         truncated_bytes=truncated_bytes,
+        nlines=nlines,
+        file_nlines=file_nlines,
     )
 
     if extra_meta:
@@ -526,7 +641,7 @@ def best_effort_record_path(record: Mapping[str, Any]) -> str:
     """
     Return a human-friendly path/identifier for a record for logging/QC.
 
-    Prefers meta['path'], then record['path'], then falls back to doc_id/origin_path,
+    Prefers meta['path'], then meta['doc_id']/meta['chunk_id'], then record['path'] or record['origin_path'];
     otherwise returns "<unknown>".
     """
     if not isinstance(record, Mapping):
@@ -537,8 +652,8 @@ def best_effort_record_path(record: Mapping[str, Any]) -> str:
         if isinstance(path_val, str) and path_val:
             return path_val
         doc_id = meta.get("doc_id") or meta.get("chunk_id")
-        if isinstance(doc_id, str) and doc_id:
-            return doc_id
+        if doc_id:
+            return str(doc_id)
     path_val = record.get("path") or record.get("origin_path")
     if isinstance(path_val, str) and path_val:
         return path_val

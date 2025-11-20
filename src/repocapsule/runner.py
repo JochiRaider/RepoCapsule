@@ -101,8 +101,31 @@ def run_engine(engine: PipelineEngine) -> Dict[str, int]:
                     reset = getattr(scorer_for_csv, "reset_state", None)
                     if callable(reset):
                         reset()
-                    rows = scorer_for_csv.score_jsonl_path(str(jsonl_path))
+                    rows = scorer_for_csv.score_jsonl_path(
+                        str(jsonl_path),
+                        fail_on_error=bool(cfg.qc.fail_on_error),
+                    )
+                    stats = getattr(scorer_for_csv, "last_stats", None)
                     write_csv(rows, out_csv)
+                    if stats is not None:
+                        err_count = getattr(stats, "parse_errors", 0) + getattr(stats, "score_errors", 0)
+                        if err_count:
+                            if hasattr(stats_obj, "qc"):
+                                try:
+                                    stats_obj.qc.errors += int(err_count)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                            log.warning(
+                                "QC CSV scoring for %s skipped lines (total=%s, scored=%s, parse_errors=%s, score_errors=%s)",
+                                jsonl_path,
+                                getattr(stats, "total_lines", None),
+                                getattr(stats, "scored_ok", None),
+                                getattr(stats, "parse_errors", None),
+                                getattr(stats, "score_errors", None),
+                            )
+                            if hasattr(stats, "error_examples"):
+                                for example in getattr(stats, "error_examples", [])[:3]:
+                                    log.debug("QC CSV example skip: %s", example)
                 else:
                     if score_jsonl_to_csv is None:
                         raise RuntimeError("QC CSV helpers unavailable; reinstall optional dependencies.")
@@ -174,9 +197,21 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
                 _consume_rows,
             )
             if not ok:
-                _score_jsonl_sequential_streaming(jsonl_path_str, scorer, _consume_rows)
+                _score_jsonl_sequential_streaming(
+                    jsonl_path_str,
+                    scorer,
+                    _consume_rows,
+                    fail_on_error=bool(qc_cfg.fail_on_error),
+                    tracker=tracker,
+                )
         else:
-            _score_jsonl_sequential_streaming(jsonl_path_str, scorer, _consume_rows)
+            _score_jsonl_sequential_streaming(
+                jsonl_path_str,
+                scorer,
+                _consume_rows,
+                fail_on_error=bool(qc_cfg.fail_on_error),
+                tracker=tracker,
+            )
         summary = tracker.as_dict()
     else:
         shards = list(_iter_jsonl_shards(jsonl_path_str))
@@ -185,11 +220,21 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
             if qc_cfg.parallel_post:
                 parallel_rows = _score_jsonl_parallel_collecting(shards, qc_cfg, config)
                 if parallel_rows is None:
-                    rows = _score_jsonl_sequential(shards, scorer)
+                    rows = _score_jsonl_sequential(
+                        shards,
+                        scorer,
+                        fail_on_error=bool(qc_cfg.fail_on_error),
+                        tracker=tracker,
+                    )
                 else:
                     rows = parallel_rows
             else:
-                rows = _score_jsonl_sequential(shards, scorer)
+                rows = _score_jsonl_sequential(
+                    shards,
+                    scorer,
+                    fail_on_error=bool(qc_cfg.fail_on_error),
+                    tracker=tracker,
+                )
 
         summary = summarize_qc_rows(
             rows,
@@ -199,6 +244,7 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
             apply_gates=False,
             enabled=bool(qc_cfg.enabled),
         )
+        summary["errors"] = tracker.errors
         out_csv = _derive_csv_path(jsonl_path, qc_cfg.csv_suffix)
         if qc_cfg.write_csv and out_csv:
             if write_csv is not None:
@@ -248,10 +294,25 @@ def _log_post_qc_summary(summary: Dict[str, Any]) -> None:
         log.info("Largest duplicate families (post-QC): none")
 
 
-def _score_jsonl_sequential(shards: List[_JsonlShard], scorer) -> List[Dict[str, Any]]:
+def _score_jsonl_sequential(
+    shards: List[_JsonlShard],
+    scorer,
+    *,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for shard in shards:
-        rows.extend(_score_lines(shard.lines, scorer, source_path=shard.path, shard_label=f"shard-{shard.index}:{shard.path}"))
+        rows.extend(
+            _score_lines(
+                shard.lines,
+                scorer,
+                source_path=shard.path,
+                shard_label=f"shard-{shard.index}:{shard.path}",
+                fail_on_error=fail_on_error,
+                tracker=tracker,
+            )
+        )
     return rows
 
 
@@ -259,9 +320,19 @@ def _score_jsonl_sequential_streaming(
     jsonl_path: str,
     scorer,
     consume_rows: Callable[[Iterable[Dict[str, Any]]], None],
+    *,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
 ) -> None:
     for shard in _iter_jsonl_shards(jsonl_path):
-        rows = _score_lines(shard.lines, scorer, source_path=shard.path, shard_label=f"shard-{shard.index}:{shard.path}")
+        rows = _score_lines(
+            shard.lines,
+            scorer,
+            source_path=shard.path,
+            shard_label=f"shard-{shard.index}:{shard.path}",
+            fail_on_error=fail_on_error,
+            tracker=tracker,
+        )
         if rows:
             consume_rows(rows)
 
@@ -344,7 +415,14 @@ def _run_parallel_qc(
                 # Thread mode: each worker builds its own scorer instance.
                 scorer = _scorer_factory()
                 label = f"shard-{shard.index}:{shard.path}"
-                return shard.index, _score_lines(shard.lines, scorer, source_path=shard.path, shard_label=label)
+                return shard.index, _score_lines(
+                    shard.lines,
+                    scorer,
+                    source_path=shard.path,
+                    shard_label=label,
+                    fail_on_error=bool(qc_cfg.fail_on_error),
+                    tracker=None,
+                )
 
             process_items_parallel(
                 shards,
@@ -667,7 +745,14 @@ def _qc_parallel_worker(shard: _JsonlShard) -> Tuple[int, List[Dict[str, Any]]]:
     if _QC_WORKER_SCORER is None:
         raise RuntimeError("QC worker scorer not initialized")
     label = f"shard-{shard.index}:{shard.path}"
-    return shard.index, _score_lines(shard.lines, _QC_WORKER_SCORER, source_path=shard.path, shard_label=label)
+    return shard.index, _score_lines(
+        shard.lines,
+        _QC_WORKER_SCORER,
+        source_path=shard.path,
+        shard_label=label,
+        fail_on_error=False,
+        tracker=None,
+    )
 
 
 def _iter_jsonl_shards(path: str, shard_size: int = 500) -> Iterator[_JsonlShard]:
@@ -693,6 +778,8 @@ def _score_lines(
     *,
     source_path: str,
     shard_label: Optional[str] = None,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     label = shard_label or source_path
@@ -700,13 +787,20 @@ def _score_lines(
         try:
             record = json.loads(line)
         except Exception as exc:
-            log.warning(
-                "Failed to parse JSONL line %d in %s: %s (this may indicate compressed JSONL or a corrupted line)",
-                idx,
-                label,
-                exc,
-            )
-            continue
+            if tracker is not None:
+                tracker.record_error()
+            if fail_on_error:
+                raise RuntimeError(
+                    f"Failed to parse JSONL line {idx} in {label}: {exc} (source_path={source_path})"
+                ) from exc
+            else:
+                log.warning(
+                    "Failed to parse JSONL line %d in %s: %s (this may indicate compressed JSONL or a corrupted line)",
+                    idx,
+                    label,
+                    exc,
+                )
+                continue
         if not isinstance(record, dict):
             continue
         if is_summary_record(record):
@@ -716,6 +810,12 @@ def _score_lines(
         except StopIteration:
             break
         except Exception as exc:
+            if tracker is not None:
+                tracker.record_error()
+            if fail_on_error:
+                raise RuntimeError(
+                    f"QC scorer failed for line {idx} in {label}: {exc} (source_path={source_path})"
+                ) from exc
             log.warning("QC scorer failed for line %d in %s: %s", idx, label, exc)
             continue
     return rows

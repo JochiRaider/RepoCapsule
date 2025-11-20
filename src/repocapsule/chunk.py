@@ -18,6 +18,9 @@ except Exception:
     tiktoken = None  # type: ignore
     _HAVE_TIKTOKEN = False
 
+_DEFAULT_TOKENIZER: Any | None = None
+_TOKENIZER_CACHE: Dict[str, Any] = {}
+
 
 # -----------------
 # Tokenizer helpers
@@ -33,17 +36,30 @@ def _get_tokenizer(tokenizer_name: Optional[str] = None):
     if not _HAVE_TIKTOKEN:
         return None
     name = tokenizer_name or "cl100k_base"
+    if tokenizer_name is None and _DEFAULT_TOKENIZER is not None:
+        return _DEFAULT_TOKENIZER
+    if tokenizer_name is not None and name in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[name]
     try:
+        tok = None
         # Prefer encoding if given; else try model lookup.
         if name in tiktoken.list_encoding_names():
-            return tiktoken.get_encoding(name)
-        try:
-            return tiktoken.encoding_for_model(name)
-        except Exception:
-            # Fallback to a common modern encoding
-            return tiktoken.get_encoding("cl100k_base")
+            tok = tiktoken.get_encoding(name)
+        if tok is None:
+            try:
+                tok = tiktoken.encoding_for_model(name)
+            except Exception:
+                # Fallback to a common modern encoding
+                tok = tiktoken.get_encoding("cl100k_base")
     except Exception:
         return None
+    if tok is None:
+        return None
+    if tokenizer_name is None:
+        _DEFAULT_TOKENIZER = tok
+    else:
+        _TOKENIZER_CACHE[name] = tok
+    return tok
 
 
 _PUNCT = set("()[]{}<>=:+-*/%,.;$#@\\|`~^")
