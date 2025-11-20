@@ -21,8 +21,8 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover - Py3.10 fallback
     tomllib = None  # type: ignore[assignment]
 
-from .log import get_logger
-from .interfaces import RepoContext
+from ..core.log import get_logger
+from ..core.interfaces import RepoContext
 
 log = get_logger(__name__)
 
@@ -191,8 +191,7 @@ ANCHOR_PHRASES = {
         "the software is provided as is and the author disclaims",
     ),
     "CC-BY-4.0": (
-        "creative commons attribution 4.0 international",
-        "creativecommons.org/licenses/by/4.0/",
+        "creative commons attribution 4.0 international public license",
     ),
     "CC-BY-SA-4.0": (
         "creative commons attribution-sharealike 4.0 international",

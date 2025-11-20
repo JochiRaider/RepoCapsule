@@ -324,7 +324,9 @@ def minhash_signature_for_text(text: str, *, k: int, n_perm: int) -> tuple[int, 
 class MinHashLSH:
     """
     Lightweight LSH with b bands of r rows (n_perm = b*r).
-    Stores bucket->doc_ids and signatures for a cheap Jaccard estimate.
+    Stores bucket->doc_ids and signatures for a cheap Jaccard estimate. Maintains a global-ish
+    index of document signatures; ``add_and_check(doc_id, sig)`` inserts the signature and returns
+    (is_near_dup, best_jaccard, dup_of_id) relative to the closest existing signature.
     """
 
     def __init__(self, n_perm: int = 128, bands: int = 32, jaccard_threshold: float = 0.82):

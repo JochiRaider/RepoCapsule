@@ -9,34 +9,41 @@ from typing import Optional, Dict, Any, Sequence, Mapping, List, Iterator, Itera
 import json
 import os
 
-from .config import QCConfig, QCMode, RepocapsuleConfig
-from .factories import (
+from ..core.config import QCConfig, QCMode, RepocapsuleConfig, SourceSpec, SinkSpec
+from ..core.factories import (
     SinkFactoryResult,
-    build_default_sinks,
-    make_github_zip_source,
-    make_local_dir_source,
     make_output_paths_for_github,
     make_output_paths_for_pdf,
     make_qc_scorer,
     make_repo_context_from_git,
 )
-from .interfaces import RepoContext
+from ..core.interfaces import RepoContext
 from .licenses import detect_license_in_tree, apply_license_to_context
-from .pipeline import process_items_parallel, PipelineEngine, _infer_executor_kind
-from .githubio import get_repo_info, parse_github_url
-from .log import get_logger
-from .qc_controller import QCSummaryTracker, summarize_qc_rows
-from .records import RunSummaryMeta, is_summary_record
-from .qc_utils import open_jsonl_maybe_gz, open_jsonl_output_maybe_gz
+from ..core.builder import build_pipeline_plan
+from ..core.pipeline import PipelineEngine
+from ..core.concurrency import Executor, resolve_qc_executor_config
+from ..sources.githubio import get_repo_info, parse_github_url, RepoSpec, detect_license_for_github_repo
+from ..core.log import get_logger
+from ..core.qc_controller import QCSummaryTracker, summarize_qc_rows
+from ..core.records import RunSummaryMeta, is_summary_record
+from ..core.qc_utils import open_jsonl_maybe_gz, open_jsonl_output_maybe_gz
 
-try:  
-    from .qc import JSONLQualityScorer, score_jsonl_to_csv, write_csv
-except Exception: 
-    JSONLQualityScorer = None  
-    score_jsonl_to_csv = None  
-    write_csv = None  
+try:
+    from ..core.extras.qc import JSONLQualityScorer, score_jsonl_to_csv, write_csv
+except Exception:
+    JSONLQualityScorer = None
+    score_jsonl_to_csv = None
+    write_csv = None
 
 log = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class GitHubRepoProfile:
+    spec: RepoSpec
+    ref: str
+    license_spdx: str | None
+    ctx: RepoContext
 
 
 @dataclass(slots=True)
@@ -60,7 +67,7 @@ def run_engine(engine: PipelineEngine) -> Dict[str, int]:
     """
     Run an existing PipelineEngine, then perform QC and append a run summary to the primary JSONL (if available).
 
-    Assumes engine.config has already been prepared (RepocapsuleConfig.prepared()).
+    Assumes engine.config has already been prepared via build_pipeline_plan.
     """
     cfg = engine.config
     stats_obj = engine.run()
@@ -93,23 +100,45 @@ def run_engine(engine: PipelineEngine) -> Dict[str, int]:
                     reset = getattr(scorer_for_csv, "reset_state", None)
                     if callable(reset):
                         reset()
-                    rows = scorer_for_csv.score_jsonl_path(str(jsonl_path))
+                    rows = scorer_for_csv.score_jsonl_path(
+                        str(jsonl_path),
+                        fail_on_error=bool(cfg.qc.fail_on_error),
+                    )
+                    stats = getattr(scorer_for_csv, "last_stats", None)
                     write_csv(rows, out_csv)
+                    if stats is not None:
+                        err_count = getattr(stats, "parse_errors", 0) + getattr(stats, "score_errors", 0)
+                        if err_count:
+                            if hasattr(stats_obj, "qc"):
+                                try:
+                                    stats_obj.qc.errors += int(err_count)  # type: ignore[attr-defined]
+                                except Exception:
+                                    pass
+                            log.warning(
+                                "QC CSV scoring for %s skipped lines (total=%s, scored=%s, parse_errors=%s, score_errors=%s)",
+                                jsonl_path,
+                                getattr(stats, "total_lines", None),
+                                getattr(stats, "scored_ok", None),
+                                getattr(stats, "parse_errors", None),
+                                getattr(stats, "score_errors", None),
+                            )
+                            if hasattr(stats, "error_examples"):
+                                for example in getattr(stats, "error_examples", [])[:3]:
+                                    log.debug("QC CSV example skip: %s", example)
                 else:
                     if score_jsonl_to_csv is None:
                         raise RuntimeError("QC CSV helpers unavailable; reinstall optional dependencies.")
                     score_jsonl_to_csv(str(jsonl_path), out_csv)
 
     qc_summary = qc_summary or stats_obj.qc.as_dict()
-    if jsonl_path:
-        stats_dict = stats_obj.as_dict()
-        summary_record = RunSummary(
-            config=cfg.to_dict(),
-            stats=stats_dict,
-            qc_summary=qc_summary if isinstance(qc_summary, dict) else None,
-            metadata=cfg.metadata.to_dict(),
-        )
-        _append_run_summary(jsonl_path, summary_record)
+    stats_dict = stats_obj.as_dict()
+    summary_record = RunSummary(
+        config=cfg.to_dict(),
+        stats=stats_dict,
+        qc_summary=qc_summary if isinstance(qc_summary, dict) else None,
+        metadata=cfg.metadata.to_dict(),
+    ).to_record()
+    _dispatch_finalizers(engine.plan.runtime.sinks, summary_record, jsonl_path, cfg.sinks.context)
     return stats_obj.as_dict()
 
 
@@ -118,18 +147,15 @@ def convert(config: RepocapsuleConfig | PipelineEngine) -> Dict[str, int]:
     """
     Entry point for all conversions.
 
-    - Passing a RepocapsuleConfig will call prepared() and build a new PipelineEngine.
+    - Passing a RepocapsuleConfig will build a PipelinePlan and a new PipelineEngine.
     - Passing an existing PipelineEngine assumes its config has already been prepared and validated.
     """
     if isinstance(config, PipelineEngine):
         return run_engine(config)
 
-    cfg = config.prepared()
-    if not cfg.sources.sources:
-        raise ValueError("RepocapsuleConfig.sources.sources must contain at least one Source")
-    if not cfg.sinks.sinks:
-        raise ValueError("RepocapsuleConfig.sinks.sinks must contain at least one Sink")
-    engine = PipelineEngine(config=cfg)
+    plan = build_pipeline_plan(config)
+    cfg = plan.config
+    engine = PipelineEngine(plan)
     return run_engine(engine)
 
 
@@ -166,9 +192,21 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
                 _consume_rows,
             )
             if not ok:
-                _score_jsonl_sequential_streaming(jsonl_path_str, scorer, _consume_rows)
+                _score_jsonl_sequential_streaming(
+                    jsonl_path_str,
+                    scorer,
+                    _consume_rows,
+                    fail_on_error=bool(qc_cfg.fail_on_error),
+                    tracker=tracker,
+                )
         else:
-            _score_jsonl_sequential_streaming(jsonl_path_str, scorer, _consume_rows)
+            _score_jsonl_sequential_streaming(
+                jsonl_path_str,
+                scorer,
+                _consume_rows,
+                fail_on_error=bool(qc_cfg.fail_on_error),
+                tracker=tracker,
+            )
         summary = tracker.as_dict()
     else:
         shards = list(_iter_jsonl_shards(jsonl_path_str))
@@ -177,11 +215,21 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
             if qc_cfg.parallel_post:
                 parallel_rows = _score_jsonl_parallel_collecting(shards, qc_cfg, config)
                 if parallel_rows is None:
-                    rows = _score_jsonl_sequential(shards, scorer)
+                    rows = _score_jsonl_sequential(
+                        shards,
+                        scorer,
+                        fail_on_error=bool(qc_cfg.fail_on_error),
+                        tracker=tracker,
+                    )
                 else:
                     rows = parallel_rows
             else:
-                rows = _score_jsonl_sequential(shards, scorer)
+                rows = _score_jsonl_sequential(
+                    shards,
+                    scorer,
+                    fail_on_error=bool(qc_cfg.fail_on_error),
+                    tracker=tracker,
+                )
 
         summary = summarize_qc_rows(
             rows,
@@ -191,6 +239,7 @@ def _run_post_qc(jsonl_path: Optional[str], config: RepocapsuleConfig) -> Dict[s
             apply_gates=False,
             enabled=bool(qc_cfg.enabled),
         )
+        summary["errors"] = tracker.errors
         out_csv = _derive_csv_path(jsonl_path, qc_cfg.csv_suffix)
         if qc_cfg.write_csv and out_csv:
             if write_csv is not None:
@@ -215,7 +264,7 @@ def _derive_csv_path(jsonl_path: Optional[str], suffix: Optional[str]) -> Option
 
 
 def _append_run_summary(jsonl_path: str, summary: RunSummary) -> None:
-    record = summary.to_record()
+    record = summary if isinstance(summary, dict) else summary.to_record()
     with open_jsonl_output_maybe_gz(jsonl_path, "a") as fp:
         fp.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
         fp.write("\n")
@@ -240,10 +289,65 @@ def _log_post_qc_summary(summary: Dict[str, Any]) -> None:
         log.info("Largest duplicate families (post-QC): none")
 
 
-def _score_jsonl_sequential(shards: List[_JsonlShard], scorer) -> List[Dict[str, Any]]:
+def _dispatch_finalizers(
+    sinks: Sequence[Sink],
+    summary_record: Dict[str, Any],
+    primary_jsonl: Optional[str],
+    context: Optional[RepoContext] = None,
+) -> None:
+    """
+    Send run summary/QC footers to sinks that support finalize(); preserve JSONL footer behavior.
+    """
+    from ..sinks.sinks import JSONLSink, GzipJSONLSink  # local import to avoid cycles
+
+    sent_to_finalize = False
+    wrote_jsonl = False
+    for sink in sinks:
+        finalize = getattr(sink, "finalize", None)
+        if callable(finalize):
+            opened_here = False
+            open_fn = getattr(sink, "open", None)
+            close_fn = getattr(sink, "close", None)
+            try:
+                if callable(open_fn):
+                    open_fn(context)
+                    opened_here = True
+                finalize([summary_record])
+                sent_to_finalize = True
+                if isinstance(sink, (JSONLSink, GzipJSONLSink)):
+                    wrote_jsonl = True
+            except Exception as exc:
+                log.warning("Sink %s failed to finalize: %s", type(sink).__name__, exc)
+            finally:
+                if opened_here and callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("Sink %s close after finalize failed: %s", type(sink).__name__, exc)
+    # Preserve legacy JSONL footer write when we haven't already written via a JSONL sink
+    if primary_jsonl and not wrote_jsonl:
+        _append_run_summary(primary_jsonl, summary_record)
+
+
+def _score_jsonl_sequential(
+    shards: List[_JsonlShard],
+    scorer,
+    *,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
+) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for shard in shards:
-        rows.extend(_score_lines(shard.lines, scorer, source_path=shard.path, shard_label=f"shard-{shard.index}:{shard.path}"))
+        rows.extend(
+            _score_lines(
+                shard.lines,
+                scorer,
+                source_path=shard.path,
+                shard_label=f"shard-{shard.index}:{shard.path}",
+                fail_on_error=fail_on_error,
+                tracker=tracker,
+            )
+        )
     return rows
 
 
@@ -251,37 +355,21 @@ def _score_jsonl_sequential_streaming(
     jsonl_path: str,
     scorer,
     consume_rows: Callable[[Iterable[Dict[str, Any]]], None],
+    *,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
 ) -> None:
     for shard in _iter_jsonl_shards(jsonl_path):
-        rows = _score_lines(shard.lines, scorer, source_path=shard.path, shard_label=f"shard-{shard.index}:{shard.path}")
+        rows = _score_lines(
+            shard.lines,
+            scorer,
+            source_path=shard.path,
+            shard_label=f"shard-{shard.index}:{shard.path}",
+            fail_on_error=fail_on_error,
+            tracker=tracker,
+        )
         if rows:
             consume_rows(rows)
-
-
-def _resolve_qc_post_concurrency(cfg: RepocapsuleConfig) -> Tuple[int, int, str]:
-    """
-    Resolve post-QC concurrency, using QC overrides when present and falling back to pipeline defaults.
-    """
-    qc = cfg.qc
-    pc = cfg.pipeline
-    pipeline_max_workers = pc.max_workers or (os.cpu_count() or 1)
-    pipeline_max_workers = max(1, pipeline_max_workers)
-    max_workers = pipeline_max_workers if qc.post_max_workers is None else qc.post_max_workers
-    max_workers = max(1, max_workers)
-
-    if qc.post_submit_window is not None:
-        window = qc.post_submit_window
-    elif pc.submit_window is not None:
-        window = pc.submit_window
-    else:
-        window = max_workers * 4
-
-    kind = (qc.post_executor_kind or pc.executor_kind or "thread").strip().lower()
-    if kind == "auto":
-        kind = _infer_executor_kind(cfg)
-    if kind not in {"thread", "process"}:
-        kind = "thread"
-    return max_workers, window, kind
 
 
 def _run_parallel_qc(
@@ -307,48 +395,53 @@ def _run_parallel_qc(
             raise RuntimeError("Unable to create scorer for parallel QC processing.")
         return additional
 
-    def _writer(shard_idx: int, shard_rows: Iterable[Dict[str, Any]]) -> None:
+    exec_cfg = resolve_qc_executor_config(config)
+    init = None
+    initargs: tuple[Any, ...] = ()
+    if exec_cfg.kind == "process":
+        payload_cfg = replace(qc_cfg, scorer=None)
+        qc_payload = asdict(payload_cfg)
+        init = _qc_worker_initializer
+        initargs = (qc_payload,)
+
+    executor = Executor(
+        exec_cfg,
+        initializer=init,
+        initargs=initargs,
+    )
+
+    def _worker(shard: _JsonlShard) -> Tuple[int, List[Dict[str, Any]]]:
+        if exec_cfg.kind == "process":
+            return _qc_parallel_worker(shard)
+        scorer = _scorer_factory()
+        label = f"shard-{shard.index}:{shard.path}"
+        return shard.index, _score_lines(
+            shard.lines,
+            scorer,
+            source_path=shard.path,
+            shard_label=label,
+            fail_on_error=bool(qc_cfg.fail_on_error),
+            tracker=None,
+        )
+
+    def _on_result(result: Tuple[int, List[Dict[str, Any]]]) -> None:
+        shard_idx, shard_rows = result
         rows_list = list(shard_rows)
         if rows_list:
             handle_rows(shard_idx, rows_list)
 
-    max_workers, window, executor_kind = _resolve_qc_post_concurrency(config)
+    def _on_error(exc: BaseException) -> None:
+        log.error("Parallel QC worker failed: %s", exc)
 
     try:
-        if executor_kind == "process":
-            # Process mode: use initializer/initargs so each process sets up its scorer once.
-            payload_cfg = replace(qc_cfg, scorer=None)
-            qc_payload = asdict(payload_cfg)
-            process_items_parallel(
-                shards,
-                _qc_parallel_worker,
-                _writer,
-                max_workers=max_workers,
-                window=window,
-                fail_fast=True,
-                executor_kind=executor_kind,
-                initializer=_qc_worker_initializer,
-                initargs=(qc_payload,),
-            )
-        else:
-
-            def _worker(shard: _JsonlShard) -> Tuple[int, List[Dict[str, Any]]]:
-                # Thread mode: each worker builds its own scorer instance.
-                scorer = _scorer_factory()
-                label = f"shard-{shard.index}:{shard.path}"
-                return shard.index, _score_lines(shard.lines, scorer, source_path=shard.path, shard_label=label)
-
-            process_items_parallel(
-                shards,
-                _worker,
-                _writer,
-                max_workers=max_workers,
-                window=window,
-                fail_fast=True,
-                executor_kind=executor_kind,
-            )
+        executor.map_unordered(
+            shards,
+            _worker,
+            _on_result,
+            fail_fast=True,
+            on_error=_on_error,
+        )
     except Exception as exc:
-        # Fail fast inside process_items_parallel, then fall back to sequential scoring.
         log.warning("Parallel QC scoring failed (%s); falling back to sequential mode.", exc)
         return False
 
@@ -391,6 +484,47 @@ def _clone_base_config(base_config: Optional[RepocapsuleConfig]) -> RepocapsuleC
     return replace(base_config) if base_config is not None else RepocapsuleConfig()
 
 
+def _build_github_repo_profile(
+    url: str,
+    *,
+    base_context: RepoContext | None = None,
+) -> GitHubRepoProfile:
+    spec = parse_github_url(url)
+    if not spec:
+        raise ValueError(f"Invalid GitHub URL: {url!r}")
+    info: Dict[str, Any] | None = None
+    try:
+        info = get_repo_info(spec)
+    except Exception:
+        info = None
+    ref = spec.ref or ((info or {}).get("default_branch")) or "main"
+    detected_license: str | None
+    try:
+        detected_license = detect_license_for_github_repo(spec, ref=ref)
+    except Exception:
+        detected_license = None
+    api_license = (info or {}).get("license_spdx")
+    license_spdx = detected_license or api_license
+    ctx = base_context
+    if ctx is None:
+        ctx = RepoContext(
+            repo_full_name=f"{spec.owner}/{spec.repo}",
+            repo_url=f"https://github.com/{spec.owner}/{spec.repo}",
+            license_id=None,
+            commit_sha=None,
+            extra={"source": "github", "ref": ref},
+        )
+    if not ctx.license_id and license_spdx:
+        ctx = RepoContext(
+            repo_full_name=ctx.repo_full_name,
+            repo_url=ctx.repo_url,
+            license_id=license_spdx,
+            commit_sha=ctx.commit_sha,
+            extra=ctx.extra,
+        )
+    return GitHubRepoProfile(spec=spec, ref=ref, license_spdx=license_spdx, ctx=ctx)
+
+
 def _finalize_profile(
     cfg: RepocapsuleConfig,
     sources: Sequence[Any],
@@ -398,9 +532,8 @@ def _finalize_profile(
     *,
     extra_metadata: Optional[Mapping[str, Any]] = None,
 ) -> RepocapsuleConfig:
-    cfg.sources = replace(cfg.sources, sources=tuple(sources))
-    cfg.sinks = sink_result.sink_config
-    combined_meta: Dict[str, Any] = dict(sink_result.metadata)
+    # Deprecated helper retained for compatibility; prefer declarative specs + registries.
+    combined_meta: Dict[str, Any] = {}
     if extra_metadata:
         for key, value in extra_metadata.items():
             if value is not None:
@@ -421,35 +554,18 @@ def default_paths_for_github(
     Returns (jsonl_path, prompt_path_or_None, context).
     Best-effort GitHub API calls to learn default branch and SPDX license.
     """
-    spec = parse_github_url(url)
-    if not spec:
-        raise ValueError(f"Invalid GitHub URL: {url!r}")
-    # Try to enrich with repo info (default branch, SPDX license)
-    ref = spec.ref
-    lic = None
-    try:
-        info = get_repo_info(spec)  # may raise on rate-limit/network
-        ref = ref or info.get("default_branch") or "main"
-        lic = info.get("license_spdx")
-    except Exception:
-        ref = ref or "main"
-        lic = None
+    profile = _build_github_repo_profile(url)
     outputs = make_output_paths_for_github(
-        owner=spec.owner,
-        repo=spec.repo,
-        ref=ref,
-        license_spdx=lic,
+        owner=profile.spec.owner,
+        repo=profile.spec.repo,
+        ref=profile.ref,
+        license_spdx=profile.license_spdx,
         out_dir=Path(out_dir),
         include_prompt=include_prompt,
     )
-    ctx = RepoContext(
-        repo_full_name=f"{spec.owner}/{spec.repo}",
-        repo_url=f"https://github.com/{spec.owner}/{spec.repo}",
-        license_id=lic,
-        commit_sha=None,
-        extra={"ref": ref},
-    )
-    return str(outputs.jsonl), (str(outputs.prompt) if outputs.prompt else None), ctx
+    jsonl = str(outputs.jsonl)
+    prompt = str(outputs.prompt) if outputs.prompt else None
+    return jsonl, prompt, profile.ctx
 
 
 def default_paths_for_pdf(
@@ -562,21 +678,26 @@ def make_local_profile(
         license_id, meta = detect_license_in_tree(str(root_dir), None)
         if license_id:
             ctx = apply_license_to_context(ctx, license_id, meta)
-    sources = [
-        make_local_dir_source(
-            root_dir,
-            config=cfg.sources.local,
-            context=ctx,
+    cfg.sinks.context = ctx
+    cfg.sources.specs = [
+        SourceSpec(kind="local_dir", options={"root_dir": str(root_dir)}),
+    ]
+    cfg.sinks.specs = [
+        SinkSpec(
+            kind="default_jsonl_prompt",
+            options={
+                "jsonl_path": str(out_jsonl),
+                "prompt_path": str(out_prompt) if out_prompt is not None else None,
+            },
         )
     ]
-    sink_result = build_default_sinks(
-        cfg.sinks,
-        jsonl_path=out_jsonl,
-        prompt_path=out_prompt,
-        context=ctx,
-    )
     extra_meta = {"repo_url": ctx.repo_url} if ctx.repo_url else {}
-    return _finalize_profile(cfg, sources, sink_result, extra_metadata=extra_meta)
+    meta_update = {"primary_jsonl": str(out_jsonl)}
+    if out_prompt is not None:
+        meta_update["prompt_path"] = str(out_prompt)
+    meta_update.update(extra_meta)
+    cfg.metadata = cfg.metadata.merged(meta_update)
+    return cfg
 
 
 def make_github_profile(
@@ -585,34 +706,32 @@ def make_github_profile(
     *,
     out_prompt: str | Path | None = None,
     base_config: Optional[RepocapsuleConfig] = None,
+    repo_context: Optional[RepoContext] = None,
 ) -> RepocapsuleConfig:
     cfg = _clone_base_config(base_config)
-    spec = parse_github_url(url)
-    if not spec:
-        raise ValueError(f"Invalid GitHub URL: {url}")
-    ctx = RepoContext(
-        repo_full_name=f"{spec.owner}/{spec.repo}",
-        repo_url=f"https://github.com/{spec.owner}/{spec.repo}",
-        extra={"source": "github"},
-    )
-    http_client = cfg.http.build_client()
-    sources = [
-        make_github_zip_source(
-            url,
-            config=cfg.sources.github,
-            context=ctx,
-            download_timeout=cfg.http.timeout,
-            http_client=http_client,
+    base_ctx = repo_context or cfg.sinks.context
+    profile = _build_github_repo_profile(url, base_context=base_ctx)
+    ctx = profile.ctx
+    cfg.sinks.context = ctx
+    cfg.sources.specs = [
+        SourceSpec(kind="github_zip", options={"url": url}),
+    ]
+    cfg.sinks.specs = [
+        SinkSpec(
+            kind="default_jsonl_prompt",
+            options={
+                "jsonl_path": str(out_jsonl),
+                "prompt_path": str(out_prompt) if out_prompt is not None else None,
+            },
         )
     ]
-    sink_result = build_default_sinks(
-        cfg.sinks,
-        jsonl_path=out_jsonl,
-        prompt_path=out_prompt,
-        context=ctx,
-    )
     extra_meta = {"repo_url": ctx.repo_url} if ctx.repo_url else {}
-    return _finalize_profile(cfg, sources, sink_result, extra_metadata=extra_meta)
+    meta_update = {"primary_jsonl": str(out_jsonl)}
+    if out_prompt is not None:
+        meta_update["prompt_path"] = str(out_prompt)
+    meta_update.update(extra_meta)
+    cfg.metadata = cfg.metadata.merged(meta_update)
+    return cfg
 @dataclass(slots=True)
 class _JsonlShard:
     index: int
@@ -638,7 +757,14 @@ def _qc_parallel_worker(shard: _JsonlShard) -> Tuple[int, List[Dict[str, Any]]]:
     if _QC_WORKER_SCORER is None:
         raise RuntimeError("QC worker scorer not initialized")
     label = f"shard-{shard.index}:{shard.path}"
-    return shard.index, _score_lines(shard.lines, _QC_WORKER_SCORER, source_path=shard.path, shard_label=label)
+    return shard.index, _score_lines(
+        shard.lines,
+        _QC_WORKER_SCORER,
+        source_path=shard.path,
+        shard_label=label,
+        fail_on_error=False,
+        tracker=None,
+    )
 
 
 def _iter_jsonl_shards(path: str, shard_size: int = 500) -> Iterator[_JsonlShard]:
@@ -664,6 +790,8 @@ def _score_lines(
     *,
     source_path: str,
     shard_label: Optional[str] = None,
+    fail_on_error: bool = False,
+    tracker: Optional[QCSummaryTracker] = None,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     label = shard_label or source_path
@@ -671,13 +799,20 @@ def _score_lines(
         try:
             record = json.loads(line)
         except Exception as exc:
-            log.warning(
-                "Failed to parse JSONL line %d in %s: %s (this may indicate compressed JSONL or a corrupted line)",
-                idx,
-                label,
-                exc,
-            )
-            continue
+            if tracker is not None:
+                tracker.record_error()
+            if fail_on_error:
+                raise RuntimeError(
+                    f"Failed to parse JSONL line {idx} in {label}: {exc} (source_path={source_path})"
+                ) from exc
+            else:
+                log.warning(
+                    "Failed to parse JSONL line %d in %s: %s (this may indicate compressed JSONL or a corrupted line)",
+                    idx,
+                    label,
+                    exc,
+                )
+                continue
         if not isinstance(record, dict):
             continue
         if is_summary_record(record):
@@ -687,6 +822,12 @@ def _score_lines(
         except StopIteration:
             break
         except Exception as exc:
+            if tracker is not None:
+                tracker.record_error()
+            if fail_on_error:
+                raise RuntimeError(
+                    f"QC scorer failed for line {idx} in {label}: {exc} (source_path={source_path})"
+                ) from exc
             log.warning("QC scorer failed for line %d in %s: %s", idx, label, exc)
             continue
     return rows

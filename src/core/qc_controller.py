@@ -9,12 +9,19 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .config import QCMode
 from .interfaces import QualityScorer, Record
-from .records import ensure_meta_dict, merge_meta_defaults, best_effort_record_path
+from .records import ensure_meta_dict, merge_meta_defaults, best_effort_record_path, filter_qc_meta
 from .qc_utils import update_dup_family_counts, top_dup_families
 
 
 @dataclass(slots=True)
 class QCSummaryTracker:
+    """
+    Tracks QC scoring outcomes for a run.
+
+    near_dup is treated as a combined flag (Simhash OR MinHash). With drop_near_dups=True,
+    any record flagged near-duplicate by either mechanism will be dropped. Duplicate families
+    are keyed by dup_family_id with counts/examples for post-QC reporting.
+    """
     enabled: bool = False
     mode: str = QCMode.INLINE
     min_score: Optional[float] = None
@@ -40,6 +47,7 @@ class QCSummaryTracker:
                 self.top_dup_snapshot.clear()
 
         low_score = self._is_low_score(qc_result)
+        # near_dup aggregates simhash + MinHash signals from the scorer
         near_dup = bool(qc_result.get("near_dup"))
 
         if low_score:
@@ -145,7 +153,7 @@ class InlineQCController:
         tracker.drop_near_dups = bool(config.drop_near_dups)
         self.summary = tracker
 
-    def should_keep(self, record: Record) -> bool:
+    def accept(self, record: Record) -> bool:
         try:
             qc_result = self.scorer.score_record(record)
         except Exception as exc:
@@ -166,6 +174,14 @@ class InlineQCController:
         self._merge_qc_meta(record, qc_result)
         return keep
 
+    def should_keep(self, record: Record) -> bool:
+        # Backward compatibility alias for legacy call sites.
+        return self.accept(record)
+
+    def on_record(self, record: Record) -> Record:
+        # Inline QC performs all work inside accept(); observer hook is a pass-through.
+        return record
+
     def summary_dict(self) -> Dict[str, Any]:
         return self.summary.as_dict()
 
@@ -173,10 +189,9 @@ class InlineQCController:
         """
         Attach QC-derived metadata to the record's ``meta`` dict.
 
-        If the scorer provides a ``tokens`` estimate we surface it as both
-        ``approx_tokens`` (always) and as ``tokens`` when the record does not
-        already carry an explicit count. Remaining QC keys (e.g., ``qc_score``,
-        ``qc_decision``, ``near_dup``) are merged via :func:`merge_meta_defaults`.
+        - Populate ``approx_tokens`` (and ``tokens`` if absent) from qc_result["tokens"].
+        - Merge canonical QC fields (QC_META_FIELDS plus qc_score from score) into ``meta``.
+        - Store all other QC metrics under ``meta["extra"]["qc_signals"]`` without clobbering existing entries.
         """
         if not isinstance(record, dict):
             return
@@ -185,7 +200,20 @@ class InlineQCController:
         if tokens_est is not None:
             meta["approx_tokens"] = tokens_est
             meta.setdefault("tokens", tokens_est)
-        merge_meta_defaults(record, qc_result)
+        canonical_qc, qc_signals = filter_qc_meta(qc_result)
+        merge_meta_defaults(record, canonical_qc)
+        extra = meta.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+            meta["extra"] = extra
+        qc_extra = extra.get("qc_signals")
+        if not isinstance(qc_extra, dict):
+            qc_extra = {}
+            extra["qc_signals"] = qc_extra
+        for key, value in qc_signals.items():
+            if key in qc_extra:
+                continue
+            qc_extra[key] = value
 
 
 def summarize_qc_rows(

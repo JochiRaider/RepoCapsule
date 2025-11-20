@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from .interfaces import RepoContext, Record
-from .records import build_record
 from typing import Iterable, Iterator, List, Optional, Sequence
 import re
+
+from ..interfaces import RepoContext, Record
+from ..records import build_record
 
 __all__ = [
     "KQLBlock",
@@ -348,6 +349,7 @@ class KqlFromMarkdownExtractor:
 
         cat = derive_category_from_rel(path)
         context_meta = (context.as_meta_seed() or None) if context else None
+        file_nlines = 0 if text == "" else text.count("\n") + 1
         out: List[Record] = []
         n = len(blocks)
         for i, b in enumerate(blocks, start=1):
@@ -366,6 +368,7 @@ class KqlFromMarkdownExtractor:
                 n_chunks=n,
                 lang="KQL",
                 extra_meta=extra_meta,
+                file_nlines=file_nlines,
             )
             out.append(rec)
         return out

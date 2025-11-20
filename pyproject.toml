@@ -9,7 +9,7 @@ description = "Repository → JSONL converter with robust decoding, structure-aw
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-  { name = "JochiRaider", email = "example@mail.com" },
+  { name = "Your Name", email = "you@example.com" },
 ]
 license = { text = "MIT" }
 keywords = ["jsonl", "github", "markdown", "kql", "ingestion", "chunking", "pdf", "evtx"]
@@ -46,9 +46,9 @@ qc = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/JochiRaider/repocapsule"
-Repository = "https://github.com/JochiRaider/repocapsule"
-Issues = "https://github.com/JochiRaider/repocapsule/issues"
+Homepage = "https://github.com/your-org/repocapsule"
+Repository = "https://github.com/your-org/repocapsule"
+Issues = "https://github.com/your-org/repocapsule/issues"
 
 [project.scripts]
 repocapsule-qc = "repocapsule.qc:main"
