@@ -1,375 +1,296 @@
 <div id="top"></div>
 
 <!-- PROJECT SHIELDS -->
-<!--
-  Reference-style links for badges live at the bottom of this file.
-  This keeps the markdown a bit easier to read.
--->
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
+
+[][contributors-url]
+[][forks-url]
+[][stars-url]
+[][issues-url]
 [![MIT License][license-shield]][license-url]
 
-
 <!-- PROJECT LOGO -->
+
 <br />
 <div align="center">
-  <a href="https://github.com/JochiRaider/RepoCapsule">
-    <img src="images/logo.png" alt="RepoCapsule logo" width="80" height="80">
-  </a>
+<a href="https://github.com/JochiRaider/RepoCapsule">
+<img src="images/logo.png" alt="RepoCapsule logo" width="80" height="80">
+</a>
 
-  <h3 align="center">RepoCapsule</h3>
+<h3 align="center">RepoCapsule</h3>
 
-  <p align="center">
-    Stdlib-first pipeline to turn code, docs, PDFs, and logs into clean JSONL chunks.
-    <br />
-    <a href="https://github.com/JochiRaider/RepoCapsule"><strong>Explore the docs »</strong></a>
-    <br />
-    <br />
-    <a href="https://github.com/JochiRaider/RepoCapsule/issues">Report Bug</a>
-    ·
-    <a href="https://github.com/JochiRaider/RepoCapsule/issues">Request Feature</a>
-  </p>
+<p align="center">
+A modular, stdlib-first pipeline to turn code, docs, PDFs, and logs into clean JSONL chunks.
+<br />
+<a href="https://github.com/JochiRaider/RepoCapsule"><strong>Explore the docs »</strong></a>
+<br />
+<br />
+<a href="https://github.com/JochiRaider/RepoCapsule/issues">Report Bug</a>
+·
+<a href="https://github.com/JochiRaider/RepoCapsule/issues">Request Feature</a>
+</p>
 </div>
 
-
 <!-- TABLE OF CONTENTS -->
+
 <details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-      <ul>
-        <li><a href="#built-with">Built With</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation">Installation</a></li>
-      </ul>
-    </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
-    <li><a href="#contributing">Contributing</a></li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-    <li><a href="#acknowledgments">Acknowledgments</a></li>
-  </ol>
+<summary>Table of Contents</summary>
+<ol>
+<li>
+<a href="#about-the-project">About The Project</a>
+<ul>
+<li><a href="#built-with">Built With</a></li>
+</ul>
+</li>
+<li>
+<a href="#getting-started">Getting Started</a>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#installation">Installation</a></li>
+</ul>
+</li>
+<li><a href="#usage">Usage</a></li>
+<li><a href="#architecture">Architecture & Concepts</a></li>
+<li><a href="#roadmap">Roadmap</a></li>
+<li><a href="#contributing">Contributing</a></li>
+<li><a href="#license">License</a></li>
+<li><a href="#contact">Contact</a></li>
+<li><a href="#acknowledgments">Acknowledgments</a></li>
+</ol>
 </details>
 
-
 <!-- ABOUT THE PROJECT -->
-## About The Project
 
-[![Product Name Screen Shot][product-screenshot]](https://github.com/JochiRaider/RepoCapsule)
+About The Project
 
-RepoCapsule is a **stdlib-first ingestion pipeline** that turns:
+![Product Name Screen Shot][product-screenshot]
 
-- Local or GitHub-hosted repositories (code + docs)
-- Web-hosted PDFs
-- Windows EVTX event logs
+RepoCapsule is a robust, extensible library for ingesting heterogeneous data sources—GitHub repositories, local file trees, web-hosted PDFs, and Windows EVTX logs—and transforming them into normalized, high-quality datasets for AI pipelines.
 
-into a **normalized JSONL dataset** that is ready for:
+Key Features
 
-- LLM fine-tuning / pre-training
-- Retrieval-augmented generation (RAG)
-- Search and analytics pipelines
+Modular Architecture: Core logic is separated from I/O implementations (sources/sinks), enabling easy extension via a registry and plugin system.
 
-### Why RepoCapsule?
+Safe by Default: Includes defenses against zip bombs, SSRF (via SafeHttpClient), and memory exhaustion (streaming-first design).
 
-There are many one-off scripts to scrape a repo or split a PDF. RepoCapsule focuses on being:
+Format Aware: Specialized handling for Markdown, reStructuredText, code, PDFs, and Windows Event Logs (EVTX).
 
-- **Safe by default** – zip-bomb defenses, size caps, safe HTTP client, and license detection.
-- **Format aware** – Markdown / reStructuredText aware chunking, code vs doc heuristics, and KQL block extraction.
-- **Composable** – small, testable building blocks (`Source`, `Sink`, `ChunkPolicy`, etc.) wired together via a `RepocapsuleConfig` and `run_pipeline` / `convert` entrypoints.
-- **Stdlib-first** – relies mainly on the Python standard library, with *optional* extras for tokenization, PDF parsing, EVTX, and quality scoring.
+Declarative Configuration: Pipelines can be defined purely via serializable configuration (TOML/JSON), making it ideal for CLI tools and reproducible runs.
 
-At a high level, RepoCapsule:
-
-1. **Discovers files** (respecting `.gitignore` and skip lists).
-2. **Safely decodes bytes** into text.
-3. **Splits text into semantic blocks** (headings, paragraphs, code fences, sections).
-4. **Chunks blocks into model-sized windows** using `ChunkPolicy` (with optional overlap).
-5. **Attaches rich metadata** (paths, languages, license info, duplication families, QC scores).
-6. **Streams JSONL records** (and optional prompt text) to your chosen sinks.
+Quality Control (QC): Optional, tunable QC scoring with inline gating, near-duplicate detection (SimHash/MinHash), and post-processing analysis.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+Built With
 
-### Built With
+RepoCapsule is designed to be lightweight, with heavy dependencies made optional.
 
-RepoCapsule is primarily a pure-Python project.
+Python (3.11+)
 
-- [Python](https://www.python.org/) (3.11+)
-- Python standard library (e.g., `pathlib`, `zipfile`, `concurrent.futures`, `urllib`)
-- Optional: [tiktoken](https://github.com/openai/tiktoken) for exact token counting
-- Optional: a PDF backend (see project extras / `pyproject.toml`)
-- Optional: an EVTX parser for Windows event logs
-- Optional: QC / scoring extras for dataset quality reports
+Core: Standard Library only (pathlib, zipfile, concurrent.futures, urllib, dataclasses).
+
+Optional Extras:
+
+[tok]: tiktoken for exact token counting.
+
+[pdf]: pypdf for PDF extraction.
+
+[evtx]: python-evtx for Windows Event Log parsing.
+
+[qc]: torch, transformers, tiktoken for advanced quality scoring heuristics.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- GETTING STARTED -->
-## Getting Started
 
-This section shows how to get a local copy of RepoCapsule up and running, either as a library or from a cloned repo.
+Getting Started
 
-### Prerequisites
+Prerequisites
 
-You will need:
+Python 3.11+
 
-- **Python 3.11+**
-- **pip** (and optionally `venv` or another virtual environment manager)
+pip
 
-On many systems you can verify this with:
+Installation
 
-```sh
-python --version
-pip --version
-```
+From Source (Recommended for development):
 
-### Installation
+git clone [https://github.com/JochiRaider/RepoCapsule.git](https://github.com/JochiRaider/RepoCapsule.git)
+cd RepoCapsule
+pip install -e .
+# Install extras as needed:
+pip install -e ".[tok,pdf,evtx,qc]"
 
-#### Option 1: Install from source (recommended while iterating on the project)
 
-1. **Clone the repo**
+From PyPI (Future):
 
-   ```sh
-   git clone https://github.com/JochiRaider/RepoCapsule.git
-   cd RepoCapsule
-   ```
+pip install repocapsule[all]
 
-2. **Create & activate a virtual environment (optional but recommended)**
-
-   ```sh
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
-   ```
-
-3. **Install RepoCapsule in editable mode**
-
-   ```sh
-   pip install -e .
-   ```
-
-   For optional features (exact token counting, PDFs, EVTX logs), use the extras defined in `pyproject.toml`:
-
-   ```sh
-   pip install -e ".[tok]"   # tiktoken-based exact token counts
-   pip install -e ".[pdf]"   # pypdf-based PDF parsing
-   pip install -e ".[evtx]"  # python-evtx-based EVTX parsing
-   ```
-
-#### Option 2: Install from PyPI (if / when published)
-
-```sh
-pip install repocapsule
-# or, with optional extras (see pyproject extras)
-pip install "repocapsule[tok]"   # tiktoken-based exact token counts
-pip install "repocapsule[pdf]"   # pypdf-based PDF parsing
-pip install "repocapsule[evtx]"  # python-evtx-based EVTX parsing
-```
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- USAGE EXAMPLES -->
-## Usage
 
-RepoCapsule is designed as a library-first toolkit. The main pieces you will interact with are:
+Usage
 
-- `RepocapsuleConfig` – top-level configuration object.
-- `Source` implementations – where bytes come from (local dirs, GitHub zips, web PDFs, EVTX, ...).
-- `ChunkPolicy` and chunking helpers – how text gets split into model-sized chunks.
-- `Sink` implementations – where normalized records go (JSONL, prompt text, custom sinks).
-- `convert` / `run_pipeline` – orchestration entrypoints.
+RepoCapsule supports two primary usage patterns: Library Mode (building objects in Python) and Declarative Mode (using configuration files).
 
-> **Note**
-> The examples below are intentionally minimal and focus on the *shape* of the pipeline. For exact signatures and all options, see `config.py`, `runner.py`, `factories.py`, and `sinks.py` in this repository.
+1. Library Mode (Python API)
+
+Directly instantiate sources, sinks, and the pipeline engine.
+
+from pathlib import Path
+from repocapsule import RepocapsuleConfig, convert_local_dir
+
+# Simple one-shot conversion of a local directory
+stats = convert_local_dir(
+    root_dir="./my-repo",
+    out_jsonl="./out/dataset.jsonl",
+    out_prompt="./out/dataset.prompt.txt"
+)
+print(stats)
 
 
-### RepocapsuleConfig at a glance
+For more control, build a config object:
 
-`RepocapsuleConfig` is a dataclass that groups all of the knobs for the ingestion pipeline into nested blocks (see `config.py`). At the top level it contains:
+from repocapsule import RepocapsuleConfig, convert
+from repocapsule.core.chunk import ChunkPolicy
 
-- `sources: SourceConfig`
-  - `sources`: explicit `Source` objects (advanced usage; helpers like `make_local_dir_source` / `make_github_zip_source` usually populate this for you).
-  - `local: LocalDirSourceConfig` – defaults for walking local directories (extensions, hidden files, `.gitignore`, per-file size caps).
-  - `github: GitHubSourceConfig` – defaults for GitHub ZIPs / API downloads (per-file caps, total uncompressed cap, allowed extensions, zip-bomb protection).
-  - `pdf: PdfSourceConfig` – defaults for web-PDF ingestion (timeouts, maximum PDF size, maximum links per page, whether to require PDFs, retry policy, user agent).
-- `decode: DecodeConfig`
-  - How raw bytes are normalised and decoded (Unicode normalisation, stripping control characters, fixing mojibake, optional per-file byte cap).
-- `chunk: ChunkConfig`
-  - `policy: ChunkPolicy` – the chunking strategy (e.g., `mode`, `target_tokens`, `overlap_tokens`, `min_tokens`).
-  - `tokenizer_name`: optional exact-token tokenizer name used when the `tok` extra is installed.
-  - `attach_language_metadata`: whether to attach language guesses to each record.
-- `pipeline: PipelineConfig`
-  - `extractors`: `Extractor` instances that turn files into logical text blocks (Markdown sections, code blocks, etc.).
-  - `bytes_handlers`: sniff-and-decode handlers; normally left as-is so `prepare()` can populate sensible defaults.
-  - `max_workers`: thread-pool size (0 = choose automatically based on CPU).
-  - `submit_window`: optional cap on the number of in-flight tasks (for backpressure), or `None` for unbounded.
-  - `fail_fast`: abort the run on the first error instead of best-effort processing.
-- `sinks: SinkConfig`
-  - `sinks`: output sinks (e.g. JSONL, prompt text, custom sinks).
-  - `context`: `RepoContext` describing the source repository; attached to each record.
-  - `output_dir`: where sink outputs are written.
-  - `primary_jsonl_name`: name for the main JSONL file (used by QC helpers and some convenience functions).
-  - `prompt: PromptConfig` – controls prompt heading format and whether a `.prompt.txt` file is emitted.
-- `http: HttpConfig`
-  - Shared HTTP client settings (timeout, redirect policy, allowed redirect suffixes). `prepare()` creates a `SafeHttpClient` and installs it globally.
-- `qc: QCConfig`
-  - Toggles dataset-quality scoring (if QC extras are installed), thresholds, duplicate detection, CSV summaries, and whether QC runs inline vs as a post-processing step.
-- `logging: LoggingConfig`
-  - Global logging level / format applied by `prepare()`.
-- `metadata: Mapping[str, object]`
-  - Free-form metadata you can attach to the run (e.g. `run_id`, `source_url`, `experiment`).
-
-In normal usage you only override the pieces you care about, then pass the config into `convert(cfg)`. The `convert` entrypoint calls `cfg.prepare()` for you, so you do not need to call it manually unless you are wiring up the pipeline yourself.
-
-### Converting a local repository
-
-```python
-import json
-from repocapsule import RepocapsuleConfig
-from repocapsule.runner import convert  # or: from repocapsule import convert
-
+# Configure the pipeline
 cfg = RepocapsuleConfig()
+cfg.chunk.policy = ChunkPolicy(mode="doc", target_tokens=512)
+cfg.sources.local.include_exts = {".py", ".md"}
 
-# Configure your sources/sinks.
-# Typical steps (see config.py for the concrete fields):
-#   - cfg.sources.sources: list of Source objects (e.g., local directories, web PDFs).
-#   - cfg.sinks.sinks: output sinks (e.g., JSONL, prompt text).
-#   - cfg.pipeline: concurrency and batching behaviour.
-#   - cfg.qc: optional quality scoring and duplicate handling.
-
-# After filling out cfg, run the pipeline:
-stats = convert(cfg)
-print(json.dumps(stats, indent=2))
-```
-
-### Converting a GitHub repo
-
-RepoCapsule includes helpers in `githubio.py` and `runner.py` to work with GitHub repositories. A typical flow is:
-
-1. Use `parse_github_url` to normalise any GitHub URL into a `RepoSpec`.
-2. Use `default_paths_for_github` to compute output paths and a `RepoContext`.
-3. Build a `RepocapsuleConfig` that includes a GitHub-based `Source`.
-4. Call `convert(config)`.
-
-### Working with PDFs
-
-To ingest a list of web-hosted PDFs:
-
-- Use `WebPdfListSource` with a list of direct PDF URLs.
-- Or use `WebPagePdfSource` to scrape one HTML page for PDF links and then delegate to `WebPdfListSource`.
-
-These sources enforce size caps, content sniffing, and retry/backoff logic, and they plug into the same pipeline as other sources.
-
-### Chunking utilities
-
-The `chunk` module is reusable on its own:
-
-```python
-from repocapsule.chunk import ChunkPolicy, count_tokens
-
-policy = ChunkPolicy(
-    mode="doc",          # or "code"
-    target_tokens=1700,
-    overlap_tokens=40,
-    min_tokens=400,
+# Use a helper to set up the run profile
+from repocapsule.cli.runner import make_local_profile
+run_cfg = make_local_profile(
+    root_dir="./src",
+    out_jsonl="./data.jsonl",
+    base_config=cfg
 )
 
-text = """# My document\n\nThis is a long document you want to chunk..."""
+# Run it
+convert(run_cfg)
 
-# You can use the policy alongside the higher-level pipeline helpers
-# or integrate it into your own tooling.
-print("Estimated tokens:", count_tokens(text, mode="auto"))
-```
 
-### Quality & license helpers
+2. Declarative Mode (TOML Config)
 
-- `licenses.detect_license_in_tree` / `detect_license_in_zip` – detect SPDX-style licenses, content licenses (e.g. Creative Commons), and attach them to a `RepoContext`.
-- `export.annotate_exact_token_counts` – post-process a JSONL file to add precise token counts when the `tok` extra is installed.
+Define your pipeline in a TOML file. This is ideal for reproducible data processing jobs.
+
+pipeline.toml:
+
+[sources.github]
+per_file_cap = 1048576 # 1MB
+
+[pipeline]
+executor_kind = "thread"
+max_workers = 4
+
+[qc]
+enabled = true
+mode = "inline"
+min_score = 0.5
+
+[sinks]
+output_dir = "./out"
+jsonl_basename = "training_data"
+
+# Define sources declaratively
+[[sources.specs]]
+kind = "github_zip"
+options = { url = "[https://github.com/psf/requests](https://github.com/psf/requests)" }
+
+
+Run it via Python:
+
+from repocapsule import load_config_from_path, convert
+
+cfg = load_config_from_path("pipeline.toml")
+convert(cfg)
+
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
+<!-- ARCHITECTURE -->
+
+Architecture & Concepts
+
+The library is organized into three main layers:
+
+Core (src/core): Contains the PipelineEngine, configuration logic, concurrency handling (Executor), and base interfaces (Source, Sink, Protocol).
+
+Builder Pattern: build_pipeline_plan converts a declarative RepocapsuleConfig into a runtime PipelinePlan, handling dependency injection and validation.
+
+Registries: src/core/registries.py allows dynamic registration of Sources, Sinks, and Scorers, enabling a plugin architecture.
+
+Implementations (src/sources, src/sinks):
+
+Sources: LocalDirSource, GitHubZipSource, WebPdfListSource, WebPagePdfSource, JSONLTextSource.
+
+Sinks: JSONLSink, PromptTextSink (for debugging/vis).
+
+Orchestration (src/cli): Higher-level helpers (like convert_github) that stitch configuration and execution together for common tasks.
+
+Key Concepts
+
+ChunkPolicy: Defines how text is split (e.g., by paragraph, by code line, token overlap).
+
+Quality Control (QC):
+
+Modes: inline (drop bad records immediately), advisory (tag but keep), post (process full dataset after extraction).
+
+Scorers: Pluggable logic to assess text quality. The default scorer uses heuristics (length, symbol ratio) and can be extended with ML models (perplexity).
+
+<p align="right">(<a href="#top">back to top</a>)</p>
 
 <!-- ROADMAP -->
-## Roadmap
 
-Planned and aspirational improvements include:
+Roadmap
 
-- [ ] Higher-level convenience builders for common configs (e.g., "just give me a GitHub URL").
-- [ ] More built-in `ChunkPolicy` presets for different model sizes.
-- [ ] Additional quality-scoring heuristics and visual QC reports.
-- [ ] More input formats (e.g., additional log formats, archives, or markup languages).
-- [ ] Example notebooks and end-to-end walkthroughs.
+[ ] CLI Tool: A dedicated repocapsule command-line interface for running TOML configs.
 
-See the [open issues](https://github.com/JochiRaider/RepoCapsule/issues) for a full list of proposed features (and known issues).
+[ ] More Sinks: Support for Parquet and LanceDB.
+
+[ ] Advanced Extractors: Better handling of Jupyter Notebooks and specialized XML formats.
+
+[ ] Plugin Ecosystem: Standardize the plugin entry point for community extensions.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- CONTRIBUTING -->
-## Contributing
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+Contributing
 
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Contributions are welcome! Please check the LICENSE file and open an issue/PR if you have ideas.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- LICENSE -->
-## License
 
-Distributed under the MIT License. See the `LICENSE` file for more information.
+License
+
+Distributed under the MIT License. See LICENSE for more information.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- CONTACT -->
-## Contact
 
-Maintainer: [@JochiRaider](https://github.com/JochiRaider)
+Contact
 
-Project Link: [https://github.com/JochiRaider/RepoCapsule](https://github.com/JochiRaider/RepoCapsule)
+Maintainer: @JochiRaider
 
-<p align="right">(<a href="#top">back to top</a>)</p>
-
-
-<!-- ACKNOWLEDGMENTS -->
-## Acknowledgments
-
-- [Best-README-Template](https://github.com/othneildrew/Best-README-Template)
-- [Shields.io](https://shields.io)
-- All the open source projects that make Python ingestion pipelines possible.
+Project Link: https://github.com/JochiRaider/RepoCapsule
 
 <p align="right">(<a href="#top">back to top</a>)</p>
-
 
 <!-- MARKDOWN LINKS & IMAGES -->
-<!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/JochiRaider/RepoCapsule.svg?style=for-the-badge
-[contributors-url]: https://github.com/JochiRaider/RepoCapsule/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/JochiRaider/RepoCapsule.svg?style=for-the-badge
-[forks-url]: https://github.com/JochiRaider/RepoCapsule/network/members
-[stars-shield]: https://img.shields.io/github/stars/JochiRaider/RepoCapsule.svg?style=for-the-badge
-[stars-url]: https://github.com/JochiRaider/RepoCapsule/stargazers
-[issues-shield]: https://img.shields.io/github/issues/JochiRaider/RepoCapsule.svg?style=for-the-badge
-[issues-url]: https://github.com/JochiRaider/RepoCapsule/issues
-[license-shield]: https://img.shields.io/github/license/JochiRaider/RepoCapsule.svg?style=for-the-badge
-[license-url]: https://github.com/JochiRaider/RepoCapsule/blob/main/LICENSE
-[product-screenshot]: images/screenshot.png
 
+[issues-url]:
+
+[]: #
+[contributors-url]: https://github.com/JochiRaider/RepoCapsule/graphs/contributors
+[]: #
+[forks-url]: https://github.com/JochiRaider/RepoCapsule/network/members
+[]: #
+[stars-url]: https://github.com/JochiRaider/RepoCapsule/stargazers
+[]: #work/members
+[]: #utors
