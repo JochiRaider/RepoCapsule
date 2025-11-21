@@ -1,4 +1,4 @@
-<div id="top"></div>
+<div id="top" align="center">
 
 <!-- PROJECT SHIELDS -->
 <!--
@@ -11,7 +11,7 @@
 [![Issues][issues-shield]][issues-url]
 [![MIT License][license-shield]][license-url]
 
-
+</div>
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
