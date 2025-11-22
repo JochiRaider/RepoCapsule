@@ -1,0 +1,105 @@
+from pathlib import Path
+import json
+
+import pytest
+
+from repocapsule.core.config import RepocapsuleConfig
+from repocapsule.core.pipeline import PipelineStats
+from repocapsule.core.dataset_card import (
+    CardFragment,
+    build_dataset_card_from_fragments,
+    build_card_fragment_for_run,
+    load_card_fragment,
+    merge_fragments,
+    write_card_fragment_for_run,
+)
+
+
+def test_card_fragment_round_trip() -> None:
+    frag = CardFragment(
+        file="data.jsonl",
+        split="train",
+        num_examples=5,
+        num_bytes=10,
+        language=["en"],
+        multilinguality="monolingual",
+        license="MIT",
+        size_categories="n<1K",
+        task_categories=["text-classification"],
+        task_ids="tc",
+        tags=["modality:text"],
+        source_repos=["https://example.com"],
+        extra={"run": 1},
+    )
+
+    payload = frag.to_dict()
+    reloaded = CardFragment.from_dict(payload)
+    assert reloaded == frag
+
+
+def test_merge_fragments_union_splits_and_langs() -> None:
+    frag_train = CardFragment(
+        file="a.jsonl",
+        split="train",
+        num_examples=800,
+        num_bytes=100,
+        language=["en"],
+        multilinguality="monolingual",
+        license="MIT",
+    )
+    frag_val = CardFragment(
+        file="b.jsonl",
+        split="validation",
+        num_examples=400,
+        num_bytes=50,
+        language=["fr"],
+        multilinguality="monolingual",
+        license="MIT",
+    )
+
+    fields = merge_fragments([frag_train, frag_val])
+    assert fields.language == ["en", "fr"]
+    assert fields.multilinguality == "multilingual"
+    assert fields.size_categories == ["1K<n<10K"]
+
+    splits = fields.dataset_info["splits"]  # type: ignore[index]
+    split_names = {s["name"] for s in splits}
+    assert {"train", "validation"} == split_names
+
+
+def test_render_dataset_card_contains_yaml_and_sections(tmp_path: Path) -> None:
+    frag = CardFragment(
+        file="c.jsonl",
+        split="train",
+        num_examples=1500,
+        num_bytes=200,
+        language=["en"],
+        multilinguality="monolingual",
+        license="Apache-2.0",
+    )
+    frag_path = tmp_path / "c.jsonl.card.json"
+    frag_path.write_text(json.dumps(frag.to_dict()), encoding="utf-8")
+
+    card_md = build_dataset_card_from_fragments([frag_path], overrides={"pretty_name": "Demo"})
+    assert "# Dataset Card for Demo" in card_md
+    assert "language:" in card_md
+    assert "size_categories:" in card_md
+    assert "## Dataset Description" in card_md
+    assert "### Dataset Summary" in card_md
+
+
+def test_write_card_fragment_for_run(tmp_path: Path) -> None:
+    jsonl_path = tmp_path / "data.jsonl"
+    sample_line = {"text": "hello", "meta": {"language": "en"}}
+    jsonl_path.write_text(json.dumps(sample_line) + "\n", encoding="utf-8")
+
+    cfg = RepocapsuleConfig()
+    cfg.metadata.primary_jsonl = str(jsonl_path)
+
+    stats = PipelineStats(records=1)
+    sidecar_path = write_card_fragment_for_run(cfg, stats)
+
+    assert sidecar_path.exists()
+    data = load_card_fragment(sidecar_path)
+    assert data.file == "data.jsonl"
+    assert data.num_examples == 1
