@@ -1,0 +1,590 @@
+# pipeline.py
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+from contextlib import ExitStack
+from dataclasses import dataclass, field
+from typing import Optional, Iterable, Sequence, Dict, List, Tuple, Any, Callable
+from pathlib import Path
+import pickle
+
+from .config import RepocapsuleConfig, FileProcessingConfig
+from .builder import PipelinePlan, build_pipeline_plan
+from .interfaces import (
+    Source,
+    Sink,
+    RepoContext,
+    Record,
+    FileExtractor,
+    ClosableSource,
+    RecordMiddleware,
+    FileMiddleware,
+)
+from .concurrency import (
+    Executor,
+    process_items_parallel,
+    resolve_pipeline_executor_config,
+)
+from .convert import DefaultExtractor
+from .log import get_logger
+from .qc_controller import QCSummaryTracker
+
+
+log = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _WorkItem:
+    item: Any
+    ctx: Optional[RepoContext]
+
+
+@dataclass
+class _ProcessFileCallable:
+    config: FileProcessingConfig
+    file_extractor: FileExtractor
+    materialize: bool = False
+
+    def __call__(self, work: _WorkItem) -> Tuple[Any, Iterable[Record]]:
+        item = work.item
+        ctx = work.ctx
+        rel = getattr(item, "path", None) or getattr(item, "rel_path", None)
+        if rel is None:
+            raise ValueError("FileItem missing 'path'")
+        recs_iter = self.file_extractor.extract(
+            item,
+            config=self.config,
+            context=ctx,
+        )
+        if self.materialize:
+            recs_iter = list(recs_iter)
+        return item, recs_iter
+
+# ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+# Convention: hot-path dataclasses use slots=True to reduce per-instance overhead.
+@dataclass(slots=True)
+class PipelineStats:
+    files: int = 0
+    bytes: int = 0
+    records: int = 0
+    sink_errors: int = 0
+    source_errors: int = 0
+    by_ext: Dict[str, int] = field(default_factory=dict)
+    qc: QCSummaryTracker = field(default_factory=QCSummaryTracker)
+
+    def as_dict(self) -> Dict[str, object]:
+        # Keep a simple, stable shape for external reporting/JSONL footers.
+        data: Dict[str, object] = {
+            "files": int(self.files),
+            "bytes": int(self.bytes),
+            "records": int(self.records),
+            "sink_errors": int(self.sink_errors),
+            "source_errors": int(self.source_errors),
+            "by_ext": dict(self.by_ext),
+        }
+        data["qc"] = self.qc.as_dict()
+        return data
+
+    def qc_top_dup_families(self) -> List[Dict[str, Any]]:
+        return self.qc.top_dup_families()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _open_source_with_stack(stack: ExitStack, src: Source) -> Source:
+    """Enter context manager if supported; else register close() if present."""
+    enter = getattr(src, "__enter__", None)
+    if callable(enter):
+        return stack.enter_context(src)  
+    close = getattr(src, "close", None)
+    if callable(close):
+        stack.callback(close)  
+    return src
+
+def _prepare_sinks(stack: ExitStack, sinks: Sequence[Sink], ctx: Optional[RepoContext]) -> List[Sink]:
+    """
+    Open sinks exactly once with RepoContext if supported.
+    """
+    open_sinks: List[Sink] = []
+    for s in sinks:
+        try:
+            # Call explicit open(context) if available.
+            open_fn = getattr(s, "open", None)
+            if callable(open_fn):
+                open_fn(ctx)  
+            # Ensure we close at the end if close exists.
+            close_fn = getattr(s, "close", None)
+            if callable(close_fn):
+                stack.callback(close_fn)  
+            open_sinks.append(s)
+        except Exception as e:
+            log.warning("Sink %s failed to open: %s", getattr(s, "__class__", type(s)).__name__, e)
+    return open_sinks
+
+
+def _get_context_from_source(source: Source) -> Optional[RepoContext]:
+    return getattr(source, "context", None)  
+
+
+def _ext_key(path: str) -> str:
+    try:
+        return Path(path).suffix.lower()
+    except Exception:
+        return ""
+
+
+def _build_file_processing_config(cfg: RepocapsuleConfig) -> FileProcessingConfig:
+    """
+    Create a sanitized config containing only per-file knobs for worker processes.
+    """
+
+    return FileProcessingConfig(
+        decode=cfg.decode,
+        chunk=cfg.chunk,
+        pipeline=cfg.pipeline,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+class PipelineEngine:
+    def __init__(self, plan: PipelinePlan) -> None:
+        self.plan = plan
+        self.config = plan.config
+        self.stats = PipelineStats()
+        self.log = get_logger(__name__)
+        self._qc_hook_factory = getattr(plan, "qc_hook_factory", None)
+        self._qc_hooks: Optional[Tuple[Callable[[Record], bool], Callable[[Record], None]]] = None
+        self.before_record_hooks: List[Callable[[Record], Record]] = []
+        self.after_record_hooks: List[Callable[[Record], Record]] = []
+        self.record_filter_hooks: List[Callable[[Record], bool]] = []
+        self.record_middlewares: List[RecordMiddleware] = []
+        self.file_middlewares: List[FileMiddleware] = []
+        self.before_source_hooks: List[Callable[[Source], None]] = []
+        self.after_source_hooks: List[Callable[[Source], None]] = []
+        self._qc_middleware: Optional[RecordMiddleware] = None
+
+    def _prepare_qc(self) -> None:
+        cfg = self.config
+        stats = self.stats
+        qc_cfg = cfg.qc
+
+        tracker = stats.qc
+        mode_val = getattr(qc_cfg, "mode", None)
+        mode_lower = mode_val.lower() if isinstance(mode_val, str) else mode_val
+        inline_or_advisory = mode_lower in {"inline", "advisory"}
+        tracker.enabled = bool(qc_cfg.enabled) and inline_or_advisory
+        tracker.mode = mode_val
+        tracker.min_score = qc_cfg.min_score
+        tracker.drop_near_dups = bool(qc_cfg.drop_near_dups)
+
+    def _attach_qc_hooks(self) -> None:
+        if self._qc_hook_factory is None:
+            return
+        if self._qc_middleware is not None:
+            try:
+                self.record_middlewares.remove(self._qc_middleware)
+            except ValueError:
+                pass
+            self._qc_middleware = None
+        try:
+            filt, obs = self._qc_hook_factory(self.stats)
+        except Exception as exc:
+            self.log.warning("Failed to attach QC hooks: %s", exc)
+            self._qc_hooks = None
+            return
+
+        def _qc_middleware(record: Record) -> Optional[Record]:
+            try:
+                if not filt(record):
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "record_filter hook %s failed: %s",
+                    getattr(filt, "__name__", filt),
+                    exc,
+                )
+                return None
+            try:
+                return obs(record)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "after_record hook %s failed: %s",
+                    getattr(obs, "__name__", obs),
+                    exc,
+                )
+                return None
+
+        self.record_middlewares.append(_qc_middleware)
+        self._qc_middleware = _qc_middleware
+        self._qc_hooks = (filt, obs)
+
+    def _apply_middlewares(self, record: Record) -> Optional[Record]:
+        current = record
+        for middleware in self.record_middlewares:
+            try:
+                current = middleware.process(current) if hasattr(middleware, "process") else middleware(current)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "record middleware %s failed: %s",
+                    getattr(middleware, "__name__", middleware),
+                    exc,
+                )
+                return None
+            if current is None:
+                return None
+        return current
+
+    def _apply_file_middlewares(self, item: Any, records: Iterable[Record]) -> Optional[Iterable[Record]]:
+        current = records
+        for middleware in self.file_middlewares:
+            try:
+                current = middleware.process(item, current) if hasattr(middleware, "process") else middleware(item, current)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "file middleware %s failed for %s: %s",
+                    getattr(middleware, "__name__", middleware),
+                    getattr(item, "path", "<unknown>"),
+                    exc,
+                )
+                return None
+            if current is None:
+                return None
+        return current
+
+    def _increment_file_stats(self, item: Any) -> None:
+        stats = self.stats
+        size = getattr(item, "size", None)
+        if size is None:
+            data = getattr(item, "data", b"")
+            if isinstance(data, (bytes, bytearray)):
+                size = len(data)
+            else:
+                size = 0
+        stats.files += 1
+        stats.bytes += int(size or 0)
+        ext = _ext_key(getattr(item, "path", ""))
+        stats.by_ext[ext] = stats.by_ext.get(ext, 0) + 1
+
+    def _make_processor(self, *, materialize: bool) -> _ProcessFileCallable:
+        cfg = self.config
+        extractor = self.plan.file_extractor or cfg.pipeline.file_extractor
+        if extractor is None:
+            extractor = DefaultExtractor()
+            cfg.pipeline.file_extractor = extractor
+        file_cfg = _build_file_processing_config(cfg)
+        return _ProcessFileCallable(
+            config=file_cfg,
+            file_extractor=extractor,
+            materialize=materialize,
+        )
+
+    def _build_executor(self) -> Tuple[Executor, bool]:
+        exec_cfg = getattr(self.plan.runtime, "executor_config", None)
+        fail_fast = getattr(self.plan.runtime, "fail_fast", False)
+        if exec_cfg is None:
+            exec_cfg, fail_fast = resolve_pipeline_executor_config(self.config, runtime=self.plan)
+        return Executor(exec_cfg), fail_fast
+
+    def _write_records(
+        self,
+        item: Any,
+        recs: Iterable[Record],
+        *,
+        sinks: Sequence[Sink],
+    ) -> None:
+        stats = self.stats
+
+        for record in recs:
+            for hook in self.before_record_hooks:
+                try:
+                    record = hook(record)
+                except Exception as exc:
+                    self.log.warning(
+                        "before_record hook %s failed: %s",
+                        getattr(hook, "__name__", hook),
+                        exc,
+                    )
+
+            keep = True
+            for check in self.record_filter_hooks:
+                try:
+                    if not check(record):
+                        keep = False
+                        break
+                except Exception as exc:
+                    self.log.warning(
+                        "record_filter hook %s failed: %s",
+                        getattr(check, "__name__", check),
+                        exc,
+                    )
+                    keep = False
+                    break
+            if not keep:
+                continue
+
+            record = self._apply_middlewares(record)
+            if record is None:
+                continue
+
+            for hook in self.after_record_hooks:
+                try:
+                    record = hook(record)
+                except Exception as exc:
+                    self.log.warning(
+                        "after_record hook %s failed: %s",
+                        getattr(hook, "__name__", hook),
+                        exc,
+                    )
+
+            wrote_any = False
+            for sink in sinks:
+                try:
+                    sink.write(record)  # type: ignore[attr-defined]
+                    wrote_any = True
+                except Exception as exc:
+                    self.log.warning(
+                        "Sink %s failed to write record for %s: %s",
+                        getattr(sink, "__class__", type(sink)).__name__,
+                        getattr(item, "path", "<unknown>"),
+                        exc,
+                    )
+                    stats.sink_errors += 1
+
+            if wrote_any:
+                stats.records += 1
+
+    def _iter_source_items(self, sources: Sequence[Source]) -> Iterable[_WorkItem]:
+        cfg = self.config
+        stats = self.stats
+        default_ctx = cfg.sinks.context
+        log = self.log
+
+        def _gen() -> Iterable[_WorkItem]:
+            for source in sources:
+                for hook in self.before_source_hooks:
+                    try:
+                        hook(source)
+                    except Exception as exc:
+                        log.warning(
+                            "before_source hook %s failed for %s: %s",
+                            getattr(hook, "__name__", hook),
+                            getattr(source, "__class__", type(source)).__name__,
+                            exc,
+                        )
+                ctx = getattr(source, "context", default_ctx)
+                try:
+                    for item in source.iter_files():
+                        yield _WorkItem(item=item, ctx=ctx)
+                except Exception as exc:
+                    log.warning(
+                        "Source %s failed while iterating files: %s",
+                        getattr(source, "__class__", type(source)).__name__,
+                        exc,
+                    )
+                    stats.source_errors += 1
+                    if cfg.pipeline.fail_fast:
+                        raise
+                finally:
+                    for hook in self.after_source_hooks:
+                        try:
+                            hook(source)
+                        except Exception as exc:
+                            log.warning(
+                                "after_source hook %s failed for %s: %s",
+                                getattr(hook, "__name__", hook),
+                                getattr(source, "__class__", type(source)).__name__,
+                                exc,
+                            )
+
+        return _gen()
+
+    def _process_serial(
+        self,
+        work: _WorkItem,
+        *,
+        processor: _ProcessFileCallable,
+        sinks: Sequence[Sink],
+        fail_fast: bool,
+    ) -> None:
+        try:
+            self._increment_file_stats(work.item)
+            _, recs = processor(work)
+            recs = self._apply_file_middlewares(work.item, recs)
+            if recs is not None:
+                self._write_records(work.item, recs, sinks=sinks)
+        except Exception as exc:
+            self.log.warning(
+                "Processing failed for %s: %s",
+                getattr(work.item, "path", "<unknown>"),
+                exc,
+            )
+            self.stats.source_errors += 1
+            if fail_fast:
+                raise
+
+    def _process_parallel(
+        self,
+        items: Iterable[_WorkItem],
+        *,
+        processor: _ProcessFileCallable,
+        sinks: Sequence[Sink],
+        executor: Executor,
+        fail_fast: bool,
+    ) -> None:
+        stats = self.stats
+        log = self.log
+        exec_cfg = executor.cfg
+
+        def _log_pickling_hint(exc: BaseException) -> None:
+            if exec_cfg.kind != "process":
+                return
+            if isinstance(exc, (pickle.PicklingError, TypeError)):
+                log.warning(
+                    "Process executor failed to serialize worker arguments; "
+                    "set pipeline.executor_kind='thread' or ensure extractors/config are picklable."
+                )
+
+        def _items_with_stats() -> Iterable[_WorkItem]:
+            for work in items:
+                self._increment_file_stats(work.item)
+                yield work
+
+        def _process_one(work: _WorkItem) -> Tuple[Any, Iterable[Record]]:
+            return processor(work)
+
+        def _on_worker_error(exc: BaseException) -> None:
+            log.warning("Worker failed: %s", exc)
+            _log_pickling_hint(exc)
+            stats.source_errors += 1
+
+        def _on_result(result: Tuple[Any, Iterable[Record]]) -> None:
+            item, recs = result
+            recs = self._apply_file_middlewares(item, recs)
+            if recs is not None:
+                self._write_records(item, recs, sinks=sinks)
+
+        try:
+            executor.map_unordered(
+                _items_with_stats(),
+                _process_one,
+                _on_result,
+                fail_fast=fail_fast,
+                on_error=_on_worker_error,
+            )
+        except Exception as exc:
+            _log_pickling_hint(exc)
+            stats.source_errors += 1
+            if fail_fast:
+                raise
+            log.warning("Parallel processing aborted: %s", exc)
+
+    def _log_qc_summary(self) -> None:
+        cfg = self.config
+        tracker = self.stats.qc
+        if not tracker.enabled:
+            return
+        min_score_str = (
+            f"{tracker.min_score:.1f}" if tracker.min_score is not None else "off"
+        )
+        self.log.info(
+            "QC summary (min_score=%s, drop_near_dups=%s)\n"
+            "  scored: %d\n"
+            "  kept: %d\n"
+            "  dropped_low_score: %d\n"
+            "  dropped_near_dup: %d\n"
+            "  candidates_low_score: %d\n"
+            "  candidates_near_dup: %d\n"
+            "  errors: %d",
+            min_score_str,
+            "on" if tracker.drop_near_dups else "off",
+            tracker.scored,
+            tracker.kept,
+            tracker.dropped_low_score,
+            tracker.dropped_near_dup,
+            tracker.candidates_low_score,
+            tracker.candidates_near_dup,
+            tracker.errors,
+        )
+        top = tracker.top_dup_families()
+        if top:
+            lines = [
+                f"    - {entry['dup_family_id']}: count={entry['count']} examples={entry.get('examples', [])}"
+                for entry in top
+            ]
+            self.log.info("Largest duplicate families:\n%s", "\n".join(lines))
+        else:
+            self.log.info("Largest duplicate families: none")
+
+    def run(self) -> PipelineStats:
+        cfg = self.config
+        self.stats = PipelineStats()
+        stats = self.stats
+        self._prepare_qc()
+        self._attach_qc_hooks()
+
+        with ExitStack() as stack:
+            open_sources: List[Source] = [
+                _open_source_with_stack(stack, src) for src in self.plan.sources
+            ]
+            initial_ctx: Optional[RepoContext] = cfg.sinks.context
+            open_sinks: List[Sink] = _prepare_sinks(stack, self.plan.sinks, initial_ctx)
+            if not open_sinks:
+                self.log.warning("No sinks are open; processed records will be dropped.")
+
+            executor, fail_fast = self._build_executor()
+            materialize_results = executor.cfg.kind == "process"
+            processor = self._make_processor(materialize=materialize_results)
+            source_items = self._iter_source_items(open_sources)
+
+            requested_kind = (cfg.pipeline.executor_kind or "auto").strip().lower()
+            resolved_kind = executor.cfg.kind
+            self.log.debug(
+                "Executor kind requested=%s resolved=%s max_workers=%d window=%d",
+                requested_kind,
+                resolved_kind,
+                executor.cfg.max_workers,
+                executor.cfg.window,
+            )
+
+            if executor.cfg.max_workers <= 1:
+                for work in source_items:
+                    self._process_serial(
+                        work,
+                        processor=processor,
+                        sinks=open_sinks,
+                        fail_fast=fail_fast,
+                    )
+            else:
+                self._process_parallel(
+                    source_items,
+                    processor=processor,
+                    sinks=open_sinks,
+                    executor=executor,
+                    fail_fast=fail_fast,
+                )
+
+        self._log_qc_summary()
+        return stats
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
+    """Run the end-to-end pipeline described by ``config``."""
+    plan = build_pipeline_plan(config)
+    engine = PipelineEngine(plan)
+    stats = engine.run()
+    return stats.as_dict()
+
+__all__ = ["run_pipeline", "PipelineStats", "PipelineEngine", "process_items_parallel"]
