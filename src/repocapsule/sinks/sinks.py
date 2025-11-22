@@ -20,6 +20,14 @@ class _BaseJSONLSink:
 
     def open(self, context: Optional[RepoContext] = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # If we've already written a header (e.g., during the main pipeline run)
+        # and the file exists, append instead of clobbering the existing dataset.
+        # This keeps finalize() calls from overwriting prior records.
+        if self._header_written and self._path.exists():
+            self._tmp_path = None
+            self._fp = self._open_append_handle(self._path)
+            return
+
         tmp_name = f"{self._path.name}.tmp"
         self._tmp_path = self._path.parent / tmp_name
         self._fp = self._open_handle(self._tmp_path)

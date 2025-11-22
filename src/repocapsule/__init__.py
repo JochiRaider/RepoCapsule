@@ -4,22 +4,36 @@
 """Top-level package exports for :mod:`repocapsule`.
 
 The names listed in :data:`PRIMARY_API` form the recommended, stable
-surface for most callers: configure a run via :class:`RepocapsuleConfig`,
-invoke a runner such as :func:`convert_local_dir`, and consume records via
-the provided sinks.
+surface for most callers: configure a run via :class:`RepocapsuleConfig`
+or a TOML/JSON file, invoke a runner such as :func:`convert_local_dir`
+/:func:`convert_github` or :func:`convert`, and consume records via the
+provided sinks.
 
-Example
--------
-    >>> from repocapsule import RepocapsuleConfig, convert_local_dir
-    >>> cfg = RepocapsuleConfig()
-    >>> convert_local_dir(cfg)
+Examples
+--------
+Minimal local directory run::
 
-Advanced utilities are still imported here for convenience, but they are
-not part of the curated API surface and may change between releases.
+    >>> from repocapsule import convert_local_dir
+    >>> stats = convert_local_dir(
+    ...     root_dir="path/to/repo",
+    ...     out_jsonl="out/repo.jsonl",
+    ... )
 
-For HTTP access (GitHub zipballs, web PDFs), configure ``cfg.http`` and pass the resulting
-``SafeHttpClient`` into factories such as ``make_github_zip_source`` or ``make_web_pdf_source``.
-The module-level ``safe_http`` global is intended only for simple one-shot scripts and the CLI.
+Config-driven run::
+
+    >>> from repocapsule import load_config_from_path, convert
+    >>> cfg = load_config_from_path("example_config.toml")
+    >>> stats = convert(cfg)
+
+Advanced utilities are imported here for convenience, but anything not in
+``PRIMARY_API`` is considered an expert surface and may change between
+releases.
+
+For HTTP access (GitHub zipballs, web PDFs), prefer configuring
+``cfg.http``; the builder/factories will construct a :class:`SafeHttpClient`
+and reuse it for remote sources. The module-level client in
+``core.safe_http`` is intended primarily for simple one-shot scripts and
+the CLI, not long-lived applications.
 """
 
 from __future__ import annotations

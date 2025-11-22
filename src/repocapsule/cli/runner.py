@@ -27,6 +27,7 @@ from ..core.log import get_logger
 from ..core.qc_controller import QCSummaryTracker, summarize_qc_rows
 from ..core.records import RunSummaryMeta, is_summary_record
 from ..core.qc_utils import open_jsonl_maybe_gz, open_jsonl_output_maybe_gz
+from ..core.dataset_card import write_card_fragment_for_run
 
 try:
     from ..core.extras.qc import JSONLQualityScorer, score_jsonl_to_csv, write_csv
@@ -139,6 +140,13 @@ def run_engine(engine: PipelineEngine) -> Dict[str, int]:
         metadata=cfg.metadata.to_dict(),
     ).to_record()
     _dispatch_finalizers(engine.plan.runtime.sinks, summary_record, jsonl_path, cfg.sinks.context)
+    try:
+        dc_cfg = getattr(cfg, "dataset_card", None)
+        if dc_cfg is None or getattr(dc_cfg, "enabled", True):
+            write_card_fragment_for_run(cfg, stats_obj)
+    except Exception:
+        log.exception("Failed to write dataset card fragment")
+
     return stats_obj.as_dict()
 
 
@@ -305,25 +313,13 @@ def _dispatch_finalizers(
     for sink in sinks:
         finalize = getattr(sink, "finalize", None)
         if callable(finalize):
-            opened_here = False
-            open_fn = getattr(sink, "open", None)
-            close_fn = getattr(sink, "close", None)
             try:
-                if callable(open_fn):
-                    open_fn(context)
-                    opened_here = True
                 finalize([summary_record])
                 sent_to_finalize = True
                 if isinstance(sink, (JSONLSink, GzipJSONLSink)):
                     wrote_jsonl = True
             except Exception as exc:
                 log.warning("Sink %s failed to finalize: %s", type(sink).__name__, exc)
-            finally:
-                if opened_here and callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug("Sink %s close after finalize failed: %s", type(sink).__name__, exc)
     # Preserve legacy JSONL footer write when we haven't already written via a JSONL sink
     if primary_jsonl and not wrote_jsonl:
         _append_run_summary(primary_jsonl, summary_record)

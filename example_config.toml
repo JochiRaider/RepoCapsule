@@ -1,112 +1,234 @@
-# manual_test_github.toml
-# Base configuration for manual_test_github.py
-#
-# This file encodes the stable, serializable knobs for the GitHub manual smoke test.
-# The Python script stitches in runtime-only objects such as:
-# - the ChunkPolicy instance
-# - optional Extractors (e.g., KqlFromMarkdownExtractor)
-#
-# Paths are interpreted relative to the working directory unless otherwise noted.
+# example_config.toml
+# Comprehensive example of the TOML layout supported by RepocapsuleConfig.
+# All tunable fields are shown with their library defaults; tweak as needed.
+# Array-of-table entries under [[sources.specs]] and [[sinks.specs]] hold the
+# declarative wiring for sources/sinks; everything else sets global defaults.
 
 # ---------------------------------------------------------------------------
-# Source configuration (GitHub zipball)
+# Source defaults (apply to specs unless overridden per-spec)
 # ---------------------------------------------------------------------------
+[sources.local]
+# include_exts = [".py", ".md"] # Optional: only include these extensions (omit to accept all)
+# exclude_exts = [".png"]       # Optional: drop these extensions
+skip_hidden = true            # Skip dotfiles / dot-directories
+follow_symlinks = false       # Control symlink traversal
+respect_gitignore = true      # Honor .gitignore when scanning local_dir
+max_file_bytes = 209715200    # 200 MiB cap for local reads
+# read_prefix_bytes = 4096      # Optional: peek prefix for very large files
+read_prefix_for_large_files_only = true
 
 [sources.github]
-# Cap bytes per file inside the GitHub archive (50 MiB, down from the 200 MiB default).
-per_file_cap = 52428800
+per_file_cap = 209715200      # Hard cap (bytes) for each file inside the GitHub zipball
+max_total_uncompressed = 2147483648  # Global uncompressed size cap (bytes) across all zip members
+max_members = 200000          # Maximum number of files allowed in the zipball before aborting
+max_compression_ratio = 100.0 # Zip bomb guard: maximum allowed file_size / compressed_size ratio
+# include_exts = [".rst"]      # Optional extension allowlist (only ingest these from the zipball)
+# exclude_exts = [".png"]      # Optional extension denylist (never ingest these from the zipball)
 
-# Only keep .rst files from the repo in this manual test (mirrors cfg.sources.github.include_exts = {".rst"}).
-include_exts = [".rst"]
+[sources.pdf]
+timeout = 60                  # Per-request timeout for web PDF downloads (seconds)
+max_pdf_bytes = 209715200     # Maximum bytes to download per PDF; abort when exceeded
+max_links = 200               # Maximum discovered links to chase from a scraped page
+require_pdf = true            # Drop responses that do not sniff as PDFs when true
+include_ambiguous = false     # Allow links without an explicit .pdf suffix when true
+retries = 1                   # Number of retry attempts per PDF URL
+user_agent = "repocapsule/0.1 (+https://github.com)" # User-Agent string for web PDF requests
+# client is injected programmatically if you want to reuse a SafeHttpClient
+download_max_workers = 4      # Number of concurrent PDF downloads (0/negative → auto based on URL count)
+# download_submit_window = 16   # Optional cap on in-flight download tasks (else max_workers * 4)
+download_executor_kind = "thread"  # Executor for downloads ("thread" only; "process" falls back to thread)
 
-# Other GitHubSourceConfig fields (max_total_uncompressed, max_members, etc.)
-# are left at their library defaults.
+[sources.csv]
+default_text_column = "text"  # Column name to treat as the source text when using csv_text source specs
+# default_delimiter = ","       # Default delimiter; inferred from extension when omitted (.tsv → tab)
+encoding = "utf-8"            # Default file encoding for CSV/TSV sources
+
+[sources.sqlite]
+default_text_columns = ["text"]  # Default columns to concatenate into text when using sqlite source specs
+batch_size = 1000                # Number of rows to fetch per batch from SQLite
+# download_max_bytes = 104857600   # Optional cap on bytes when downloading remote SQLite DBs
+retries = 2                      # Number of retry attempts for downloading a remote SQLite DB
 
 # ---------------------------------------------------------------------------
-# Pipeline concurrency / behavior
+# Declarative sources (each spec uses the defaults above unless overridden)
+# Uncomment the blocks you need.
 # ---------------------------------------------------------------------------
+[[sources.specs]]
+kind = "local_dir"
+options = { root_dir = "path/to/repo" }  # Walk a local repository directory tree
+
+[[sources.specs]]
+kind = "github_zip"
+options = { url = "https://github.com/owner/repo/archive/refs/heads/main.zip" }  # Download and scan a GitHub zipball
+
+[[sources.specs]]
+kind = "web_pdf_list"
+options = { urls = ["https://example.com/a.pdf", "https://example.com/b.pdf"], add_prefix = "webpdfs" } # Direct list of PDF URLs
+
+[[sources.specs]]
+kind = "web_page_pdf"
+options = { page_url = "https://example.com/page-with-links", add_prefix = "pagepdfs" } # Scrape a page for PDF links
+
+[[sources.specs]]
+kind = "csv_text"
+[sources.specs.options]
+paths = ["data/train.csv", "data/extra.tsv.gz"]  # One or more CSV/TSV files (optionally gzipped)
+text_column = "text"         # Name of the text column (defaults to sources.csv.default_text_column)
+delimiter = ","              # Column delimiter (defaults to sources.csv.default_delimiter)
+encoding = "utf-8"           # Encoding for these CSV/TSV files
+has_header = true            # Whether the first row is a header row
+text_column_index = 0        # Index of text column when has_header = false
+
+[[sources.specs]]
+kind = "sqlite"
+[sources.specs.options]
+db_path = "data/example.db"               # Local path where the SQLite DB should reside
+db_url = "https://example.com/example.db"  # Optional URL to download the DB if db_path is missing
+table = "documents"                       # Table to read from (mutually exclusive with sql)
+# sql = "SELECT id, text FROM documents"  # Custom SQL query instead of table-based selection
+text_columns = ["text"]                   # Columns whose contents are concatenated into text
+id_column = "id"                          # Column to use for stable record IDs / paths
+where = "text IS NOT NULL"               # Optional WHERE clause to filter rows
+batch_size = 1000                        # Overrides sources.sqlite.batch_size for this spec
+download_timeout = 60.0                  # Per-request timeout for downloading the DB (seconds)
+download_max_bytes = 104857600           # Maximum allowed size of the downloaded DB (bytes)
+retries = 2                              # Retries when downloading the DB fails
+
+# ---------------------------------------------------------------------------
+# Decode / chunk / pipeline behavior
+# ---------------------------------------------------------------------------
+[decode]
+normalize = "NFC"             # Unicode normalization (comment out to disable)
+strip_controls = true         # Strip zero-width and unsafe control characters
+fix_mojibake = true           # Attempt to repair common UTF-8-as-cp1252 mojibake
+# max_bytes_per_file = 1048576  # Optional soft cap on bytes decoded per file (truncate beyond this)
+
+[chunk]
+# tokenizer_name = "cl100k_base" # Optional tokenizer name for token counting (requires [tok] extra)
+attach_language_metadata = true  # Attach language labels to chunks in record metadata
+
+  [chunk.policy]
+  mode = "doc"                # "doc" or "code"
+  target_tokens = 1700        # Approximate target token count per chunk
+  overlap_tokens = 40         # Approximate token overlap between consecutive chunks
+  min_tokens = 400            # Minimum token count before forcing a flush
+  semantic_doc = false        # Enable paragraph/sentence-aware splitting for long doc blocks
+  # semantic_tokens_per_block = 600  # Target tokens per semantic sub-block when semantic_doc is true
 
 [pipeline]
-# Use threads for the main pipeline (suitable for mixed I/O and light CPU work).
-executor_kind = "thread"
-# max_workers = 0 → auto; submit_window = null → derived from max_workers.
-# We rely on those defaults here.
+# extractors / bytes_handlers / file_extractor are typically wired in Python.
+max_workers = 0               # 0 → auto (os.cpu_count or 1)
+# submit_window = 8            # Optional max number of pending tasks (else max_workers * 4)
+fail_fast = false             # Abort the pipeline on the first worker error when true
+executor_kind = "auto"        # Executor kind: "thread", "process", or "auto" (auto-infers based on sources/handlers)
+
+# ---------------------------------------------------------------------------
+# Sinks (defaults + declarative specs)
+# ---------------------------------------------------------------------------
+[sinks]
+# context is typically provided programmatically (RepoContext)
+output_dir = "out"            # Base directory for outputs when explicit paths are not given
+# primary_jsonl_name is filled by builders when default_jsonl_prompt is used
+compress_jsonl = false        # Gzip-compress the primary JSONL when true
+jsonl_basename = "data"       # Default basename for JSONL when factories derive paths
+
+[sinks.prompt]
+heading_fmt = "### {path} [chunk {chunk}]"  # Template for headings in the prompt text sink
+include_prompt_file = true   # Enable or disable writing the prompt text sink
+
+[[sinks.specs]]
+kind = "default_jsonl_prompt"
+[sinks.specs.options]
+jsonl_path = "out/data.jsonl"        # Path to the primary JSONL output
+prompt_path = "out/data.prompt.txt"  # Path for the prompt text sink (comment out to skip prompt sink)
+
+[[sinks.specs]]
+kind = "parquet_dataset"
+[sinks.specs.options]
+path = "out/data.parquet"    # Target Parquet file or dataset directory
+text_field = "text"          # Field name for chunk text column in Parquet
+meta_field = "meta"          # Field name for metadata column in Parquet
+partition_by = ["repo"]      # Optional list of metadata keys to partition the dataset by
+row_group_size = 5000        # Target row group size for Parquet writes
+compression = "snappy"       # Parquet compression codec (e.g., "snappy", "zstd", "gzip")
+overwrite = true             # Overwrite an existing Parquet target when true
+
+# ---------------------------------------------------------------------------
+# HTTP client defaults
+# ---------------------------------------------------------------------------
+[http]
+timeout = 60.0               # Default timeout (seconds) for HTTP requests
+max_redirects = 5            # Maximum number of redirects allowed per request
+allowed_redirect_suffixes = ["github.com"]  # Domains allowed for cross-host redirects
+# client can be supplied programmatically to reuse a SafeHttpClient
+as_global = true             # Install the built client as the global SafeHttpClient when true
 
 # ---------------------------------------------------------------------------
 # Quality control (QC)
 # ---------------------------------------------------------------------------
-
 [qc]
-# Master on/off switch for QC (ENABLE_QC = True).
-enabled = true
+enabled = false              # Enable quality scoring and gating when true
+write_csv = false            # Emit a QC CSV alongside JSONL using QC scorers
+csv_suffix = "_quality.csv"  # Suffix to use for QC CSV filenames
+fail_on_error = false        # Raise on QC errors rather than logging and continuing
+min_score = 60.0             # Minimum QC score required to keep records (inline/advisory modes)
+drop_near_dups = false       # Drop near-duplicate records based on QC duplicate detection
+mode = "inline"               # "inline", "advisory", "post", or "off"
+parallel_post = false        # Use process-based parallelism for post-QC when true
+# post_executor_kind = "process" # Executor kind override for post-QC scoring
+# post_max_workers = 4        # Maximum workers for post-QC (defaults to pipeline.max_workers)
+# post_submit_window = 16     # Submit window for post-QC executor (defaults to pipeline.submit_window)
+# scorer is wired via registry in Python (kept out of TOML)
 
-# "inline", "advisory", "post", or "off" (QC_MODE = QCMode.INLINE).
-mode = "inline"
-
-# Minimum score; below this records are dropped in inline mode (QC_MIN_SCORE = 40.0).
-min_score = 40.0
-
-# Keep near-duplicate records for this manual test (QC_DROP_NEAR_DUPS = False).
-drop_near_dups = false
-
-# Write a CSV summary of QC results alongside the JSONL (QC_WRITE_CSV / QC_CSV_SUFFIX).
-write_csv = true
-csv_suffix = "_quality.csv"
-
-# Fail the run if QC itself errors? For a manual smoke test we keep this off.
-fail_on_error = false
-
-# Post-QC knobs are left at defaults; parallel_post only matters when mode="post".
-parallel_post = false
-
-# ---------------------------------------------------------------------------
-# Sinks: where output goes
-# ---------------------------------------------------------------------------
-
-[sinks]
-# Default base directory used when a JSONL path is not supplied explicitly.
-# In this manual script we pass explicit jsonl/prompt paths, so this is primarily
-# metadata / documentation.
-output_dir = "out"
-compress_jsonl = false
-jsonl_basename = "data"
-
-[sinks.prompt]
-heading_fmt = "### {path} [chunk {chunk}]"
-include_prompt_file = true
+[qc.heuristics]
+target_code_min = 2000       # Lower bound of target token band for code-like content
+target_code_max = 4000       # Upper bound of target token band for code-like content
+target_log_min = 1000        # Lower bound of target token band for log/structured content
+target_log_max = 2000        # Upper bound of target token band for log/structured content
+target_text_min = 1500       # Lower bound of target token band for text/doc content
+target_text_max = 2000       # Upper bound of target token band for text/doc content
+target_other_min = 1000      # Lower bound of target token band for other content
+target_other_max = 3000      # Upper bound of target token band for other content
+repetition_k = 16            # k-gram length for repetition/near-dup heuristics
+code_short_line_threshold = 60  # Maximum line length to be considered a "short" code line
+code_punct_weight = 0.5      # Weight of punctuation density in code complexity score
+code_short_line_weight = 0.5 # Weight of short-line ratio in code complexity score
+simhash_window = 128         # Window size for simhash-based near-duplicate detection
+# simhash_hamm_thresh = 3     # Maximum Hamming distance to treat two hashes as near-duplicates
+# enable_minhash = true       # Enable MinHash-based global duplicate detection
+# minhash_perms = 128         # Number of permutations for MinHash signatures
+# minhash_bands = 32          # Number of bands for MinHash LSH
+# minhash_shingle_k = 5       # Byte-level shingle size for MinHash
+# minhash_jaccard_thresh = 0.8 # Jaccard threshold to treat MinHash matches as near-duplicates
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-
 [logging]
-level = "INFO"
-propagate = false
-fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-logger_name = "repocapsule"
+level = "INFO"               # Log level for the repocapsule logger
+propagate = false            # Propagate logs to the root logger when true
+fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s" # Logging format string
+logger_name = "repocapsule"  # Base logger name used for all repocapsule logs
 
 # ---------------------------------------------------------------------------
-# HTTP / web fetching defaults
+# Metadata stored in run headers and dataset cards
 # ---------------------------------------------------------------------------
-
-[http]
-# These match the library defaults but are shown here for clarity.
-timeout = 60.0
-max_redirects = 5
-allowed_redirect_suffixes = ["github.com"]
-as_global = true
-
-# ---------------------------------------------------------------------------
-# Metadata (optional; mostly filled in by helpers)
-# ---------------------------------------------------------------------------
-
 [metadata]
-# These will be overridden by the runner helpers based on the actual output paths,
-# but you can pre-populate them if desired.
-primary_jsonl = "out/data.jsonl"
-prompt_path   = "out/data.prompt.txt"
-repo_url      = "https://github.com/SystemsApproach/book"
+primary_jsonl = "out/data.jsonl"     # Canonical path to the primary JSONL (used in run headers and dataset cards)
+prompt_path = "out/data.prompt.txt"  # Canonical path to the prompt text file
+repo_url = "https://github.com/example/repo" # Source repository URL associated with this run
 
 [metadata.extra]
-run_label = "manual-test-github"
-notes    = "Manual GitHub smoke test using manual_test_github.py."
+run_label = "example-run"    # Arbitrary label for this run (for your tracking)
+notes = "Free-form metadata carried through RunSummaryMeta." # Additional notes stored in run summaries
+
+# ---------------------------------------------------------------------------
+# Dataset card guidance (Hugging Face style)
+# ---------------------------------------------------------------------------
+[dataset_card]
+enabled = true               # Enable writing dataset-card fragments for each run
+split_name = "train"         # Default split name (e.g., "train", "validation", "test")
+# license = "MIT"              # SPDX license string or list (used in dataset cards)
+# task_categories = "text-classification" # Task category label(s) for the dataset card
+# task_ids = "question-answering"         # Task id(s) for the dataset card (e.g., HF task ids)
+# tags = ["code", "docs"]      # Additional tags applied to the dataset card

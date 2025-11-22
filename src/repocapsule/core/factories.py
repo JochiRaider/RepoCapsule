@@ -55,6 +55,7 @@ __all__ = [
     "make_http_client",
     "make_local_dir_source",
     "make_web_pdf_source",
+    "make_csv_text_source",
     "make_output_paths_for_github",
     "make_output_paths_for_pdf",
     "make_jsonl_text_source",
@@ -64,7 +65,10 @@ __all__ = [
     "GitHubZipSourceFactory",
     "WebPdfListSourceFactory",
     "WebPagePdfSourceFactory",
+    "SQLiteSourceFactory",
+    "CsvTextSourceFactory",
     "DefaultJsonlPromptSinkFactory",
+    "ParquetDatasetSinkFactory",
 ]
 
 Sniff = Callable[[bytes, str], bool]
@@ -175,10 +179,34 @@ def make_jsonl_text_source(
     context: Optional[RepoContext] = None,
     text_key: str = "text",
 ):
-    from .jsonl_source import JSONLTextSource
+    from ..sources.jsonl_source import JSONLTextSource
 
     norm_paths = [Path(p) for p in paths]
     return JSONLTextSource(paths=tuple(norm_paths), context=context, text_key=text_key)
+
+
+def make_csv_text_source(
+    paths: Sequence[str | Path],
+    *,
+    context: Optional[RepoContext] = None,
+    text_column: str = "text",
+    delimiter: Optional[str] = None,
+    encoding: str = "utf-8",
+    has_header: bool = True,
+    text_column_index: int = 0,
+):
+    from ..sources.csv_source import CSVTextSource
+
+    norm_paths = [Path(p) for p in paths]
+    return CSVTextSource(
+        paths=tuple(norm_paths),
+        context=context,
+        text_column=text_column,
+        delimiter=delimiter,
+        encoding=encoding,
+        has_header=has_header,
+        text_column_index=text_column_index,
+    )
 
 
 def make_pattern_file_source(
@@ -204,7 +232,7 @@ class LocalDirSourceFactory(SourceFactory):
             raise ValueError("local_dir source spec requires root_dir")
         ctx = cfg.sinks.context
         src = make_local_dir_source(
-            root_dir=root,
+            root=root,
             config=cfg.sources.local,
             context=ctx,
         )
@@ -273,6 +301,95 @@ class WebPagePdfSourceFactory(SourceFactory):
 
 
 @dataclass
+class SQLiteSourceFactory(SourceFactory):
+    id: str = "sqlite"
+
+    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+        from ..sources.sqlite_source import SQLiteSource
+
+        options = spec.options or {}
+        sqlite_cfg = cfg.sources.sqlite
+
+        db_path_str = options.get("db_path")
+        if not db_path_str:
+            raise ValueError("sqlite source spec requires db_path")
+        db_url = options.get("db_url")
+
+        table = options.get("table")
+        sql = options.get("sql")
+        text_columns = options.get("text_columns", sqlite_cfg.default_text_columns)
+        if isinstance(text_columns, str):
+            text_columns = (text_columns,)
+        id_column = options.get("id_column")
+        where = options.get("where")
+
+        batch_size = options.get("batch_size", sqlite_cfg.batch_size)
+        download_timeout = options.get("download_timeout", cfg.http.timeout)
+        download_max_bytes = options.get("download_max_bytes", sqlite_cfg.download_max_bytes)
+        retries = options.get("retries", sqlite_cfg.retries)
+
+        db_path = Path(db_path_str)
+        ctx = cfg.sinks.context
+        client = cfg.http.build_client()
+
+        src = SQLiteSource(
+            db_path=db_path,
+            context=ctx,
+            table=table,
+            sql=sql,
+            text_columns=text_columns,
+            id_column=id_column,
+            where=where,
+            batch_size=batch_size,
+            db_url=db_url,
+            download_timeout=download_timeout,
+            download_max_bytes=download_max_bytes,
+            retries=retries,
+            client=client,
+        )
+        return [src]
+
+
+@dataclass
+class CsvTextSourceFactory(SourceFactory):
+    id: str = "csv_text"
+
+    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+        from ..sources.csv_source import CSVTextSource
+
+        options = spec.options or {}
+        csv_cfg = cfg.sources.csv
+        raw_paths = options.get("paths") or options.get("path")
+        if not raw_paths:
+            raise ValueError("csv_text source spec requires 'paths' (list) or 'path'")
+
+        if isinstance(raw_paths, (str, Path)):
+            paths = [raw_paths]
+        else:
+            paths = list(raw_paths)
+
+        text_column = options.get("text_column", csv_cfg.default_text_column)
+        delimiter = options.get("delimiter", csv_cfg.default_delimiter)
+        encoding = options.get("encoding", csv_cfg.encoding)
+        has_header = options.get("has_header", True)
+        text_column_index = options.get("text_column_index", 0)
+
+        norm_paths = [Path(p) for p in paths]
+        ctx = cfg.sinks.context
+
+        src = CSVTextSource(
+            paths=tuple(norm_paths),
+            context=ctx,
+            text_column=text_column,
+            delimiter=delimiter,
+            encoding=encoding,
+            has_header=has_header,
+            text_column_index=text_column_index,
+        )
+        return [src]
+
+
+@dataclass
 class DefaultJsonlPromptSinkFactory(SinkFactory):
     id: str = "default_jsonl_prompt"
 
@@ -288,6 +405,58 @@ class DefaultJsonlPromptSinkFactory(SinkFactory):
             jsonl_path=jsonl_path,
             prompt_path=prompt_path,
             context=ctx,
+        )
+
+
+@dataclass
+class ParquetDatasetSinkFactory(SinkFactory):
+    id: str = "parquet_dataset"
+
+    def build(self, cfg: "RepocapsuleConfig", spec: "SinkSpec") -> SinkFactoryResult:
+        sink_cfg = cfg.sinks
+        options = spec.options or {}
+        path = options.get("path")
+        if path is None:
+            raise ValueError("parquet_dataset sink spec requires path")
+        text_field = options.get("text_field", "text")
+        meta_field = options.get("meta_field", "meta")
+        partition_opt = options.get("partition_by")
+        partition_by = [str(p) for p in partition_opt] if partition_opt else []
+        row_group_size = options.get("row_group_size")
+        if row_group_size is not None:
+            try:
+                row_group_size = int(row_group_size)
+            except Exception as exc:
+                raise ValueError("row_group_size must be an int") from exc
+            if row_group_size <= 0:
+                row_group_size = None
+        compression = options.get("compression", "snappy") or "snappy"
+        overwrite = bool(options.get("overwrite", True))
+        try:
+            from ..sinks.parquet import ParquetDatasetSink  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Parquet sink requires the 'parquet' extra (install repocapsule[parquet])."
+            ) from exc
+        except Exception as exc:  # pragma: no cover - defensive guard
+            raise RuntimeError(f"Parquet sink could not be constructed: {exc}") from exc
+
+        sink = ParquetDatasetSink(
+            path=path,
+            text_field=text_field,
+            meta_field=meta_field,
+            partition_by=partition_by,
+            row_group_size=row_group_size,
+            compression=compression,
+            overwrite=overwrite,
+        )
+        jsonl_path = sink_cfg.primary_jsonl_name or str(cfg.metadata.primary_jsonl or "")
+        metadata = {"parquet_path": str(path)}
+        return SinkFactoryResult(
+            jsonl_path=jsonl_path,
+            sinks=[sink],
+            sink_config=sink_cfg,
+            metadata=metadata,
         )
 
 
@@ -338,7 +507,7 @@ def make_qc_scorer(
 
 def make_bytes_handlers(registry: Optional[BytesHandlerRegistry] = None) -> Sequence[Tuple[Sniff, BytesHandler]]:
     """
-    Return the default sniff/handler pairs for binary formats (PDF/EVTX).
+    Return the default sniff/handler pairs for binary formats (PDF/EVTX/Parquet).
     """
     reg = registry or bytes_handler_registry
     if not reg.handlers():
@@ -348,6 +517,10 @@ def make_bytes_handlers(registry: Optional[BytesHandlerRegistry] = None) -> Sequ
             pass
         try:
             from ..sources import evtxio  # noqa: F401
+        except Exception:
+            pass
+        try:
+            from ..sources import parquetio  # noqa: F401
         except Exception:
             pass
     handlers = list(reg.handlers())

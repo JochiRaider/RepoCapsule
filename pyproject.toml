@@ -12,7 +12,7 @@ authors = [
   { name = "Your Name", email = "you@example.com" },
 ]
 license = { text = "MIT" }
-keywords = ["jsonl", "github", "markdown", "kql", "ingestion", "chunking", "pdf", "evtx"]
+keywords = ["jsonl", "github", "markdown", "kql", "ingestion", "chunking", "pdf", "evtx", "parquet"]
 
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -44,6 +44,7 @@ qc = [
   "tiktoken>=0.6",
   "pyyaml>=6",
 ]
+parquet = ["pyarrow>=15"]
 
 [project.urls]
 Homepage = "https://github.com/your-org/repocapsule"
@@ -71,6 +72,7 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
 
 [tool.mypy]
 python_version = "3.11"

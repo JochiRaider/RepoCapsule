@@ -119,6 +119,8 @@ def default_source_registry() -> SourceRegistry:
         GitHubZipSourceFactory,
         WebPdfListSourceFactory,
         WebPagePdfSourceFactory,
+        CsvTextSourceFactory,
+        SQLiteSourceFactory,
     )
 
     reg = SourceRegistry()
@@ -126,14 +128,17 @@ def default_source_registry() -> SourceRegistry:
     reg.register(GitHubZipSourceFactory())
     reg.register(WebPdfListSourceFactory())
     reg.register(WebPagePdfSourceFactory())
+    reg.register(CsvTextSourceFactory())
+    reg.register(SQLiteSourceFactory())
     return reg
 
 
 def default_sink_registry() -> SinkRegistry:
-    from .factories import DefaultJsonlPromptSinkFactory
+    from .factories import DefaultJsonlPromptSinkFactory, ParquetDatasetSinkFactory
 
     reg = SinkRegistry()
     reg.register(DefaultJsonlPromptSinkFactory())
+    reg.register(ParquetDatasetSinkFactory())
     return reg
 
 

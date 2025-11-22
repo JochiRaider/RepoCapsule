@@ -117,12 +117,29 @@ class PdfSourceConfig:
 
 
 @dataclass(slots=True)
+class CsvSourceConfig:
+    default_text_column: str = "text"
+    default_delimiter: Optional[str] = None
+    encoding: str = "utf-8"
+
+
+@dataclass(slots=True)
+class SQLiteSourceConfig:
+    default_text_columns: Tuple[str, ...] = ("text",)
+    batch_size: int = 1000
+    download_max_bytes: Optional[int] = None
+    retries: int = 2
+
+
+@dataclass(slots=True)
 class SourceConfig:
     specs: List["SourceSpec"] = field(default_factory=list)
     sources: Sequence[Source] = field(default_factory=tuple)
     local: LocalDirSourceConfig = field(default_factory=LocalDirSourceConfig)
     github: GitHubSourceConfig = field(default_factory=GitHubSourceConfig)
     pdf: PdfSourceConfig = field(default_factory=PdfSourceConfig)
+    csv: CsvSourceConfig = field(default_factory=CsvSourceConfig)
+    sqlite: SQLiteSourceConfig = field(default_factory=SQLiteSourceConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +223,16 @@ class SinkConfig:
 
 
 @dataclass(slots=True)
+class DatasetCardConfig:
+    enabled: bool = True
+    split_name: str = "train"
+    license: Optional[Union[str, Sequence[str]]] = None
+    task_categories: Optional[Union[str, Sequence[str]]] = None
+    task_ids: Optional[Union[str, Sequence[str]]] = None
+    tags: Optional[Union[str, Sequence[str]]] = None
+
+
+@dataclass(slots=True)
 class SourceSpec:
     """Declarative source entry; factories map kind -> concrete sources."""
 
@@ -215,7 +242,13 @@ class SourceSpec:
 
 @dataclass(slots=True)
 class SinkSpec:
-    """Declarative sink entry; factories map kind -> concrete sinks."""
+    """Declarative sink entry; factories map kind -> concrete sinks.
+
+    Known kinds:
+    - "default_jsonl_prompt": options jsonl_path, prompt_path
+    - "parquet_dataset": options path (required), text_field/meta_field, partition_by,
+      row_group_size, compression, overwrite
+    """
 
     kind: str
     options: Dict[str, Any] = field(default_factory=dict)
@@ -467,10 +500,13 @@ class RepocapsuleConfig:
     qc: QCConfig = field(default_factory=QCConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     metadata: RunMetadata = field(default_factory=RunMetadata)
+    dataset_card: DatasetCardConfig = field(default_factory=DatasetCardConfig)
 
     def __post_init__(self) -> None:
         if not isinstance(self.metadata, RunMetadata):
             self.metadata = RunMetadata.from_dict(dict(self.metadata or {}))
+        if not isinstance(self.dataset_card, DatasetCardConfig):
+            self.dataset_card = DatasetCardConfig(**dict(self.dataset_card or {}))
         if self.sources.sources:
             raise ValueError("sources.sources must be empty in declarative specs; use sources.specs instead.")
         if self.sinks.sinks:
