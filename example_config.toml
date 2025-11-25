@@ -3,6 +3,8 @@
 # All tunable fields are shown with their library defaults; tweak as needed.
 # Array-of-table entries under [[sources.specs]] and [[sinks.specs]] hold the
 # declarative wiring for sources/sinks; everything else sets global defaults.
+# Use [sources.defaults.<kind>] and [sinks.defaults.<kind>] to share per-kind
+# overrides across multiple specs (matching the SourceSpec/SinkSpec.kind values).
 
 # ---------------------------------------------------------------------------
 # Source defaults (apply to specs unless overridden per-spec)
@@ -48,6 +50,35 @@ default_text_columns = ["text"]  # Default columns to concatenate into text when
 batch_size = 1000                # Number of rows to fetch per batch from SQLite
 # download_max_bytes = 104857600   # Optional cap on bytes when downloading remote SQLite DBs
 retries = 2                      # Number of retry attempts for downloading a remote SQLite DB
+
+# ---------------------------------------------------------------------------
+# Optional per-kind defaults (applied to specs before per-spec overrides)
+# Keys match SourceSpec.kind (e.g., "local_dir", "github_zip") or fallback names
+# like "pdf"/"sqlite" used by some factories.
+# ---------------------------------------------------------------------------
+[sources.defaults.local_dir]
+# max_file_bytes = 104857600     # Example: tighten the default for all local_dir specs
+# respect_gitignore = false
+
+[sources.defaults.github_zip]
+# include_exts = [".md", ".rst"]
+# exclude_exts = [".png"]
+
+[sources.defaults.web_pdf_list]
+# download_max_workers = 8
+# include_exts = [".pdf"]
+
+[sources.defaults.web_page_pdf]
+# max_links = 100
+# include_exts = [".pdf"]
+
+[sources.defaults.csv_text]
+# default_delimiter = ","
+# encoding = "utf-8"
+
+[sources.defaults.sqlite]
+# batch_size = 2000
+# download_max_bytes = 104857600
 
 # ---------------------------------------------------------------------------
 # Declarative sources (each spec uses the defaults above unless overridden)
@@ -127,10 +158,20 @@ executor_kind = "auto"        # Executor kind: "thread", "process", or "auto" (a
 # ---------------------------------------------------------------------------
 [sinks]
 # context is typically provided programmatically (RepoContext)
-output_dir = "out"            # Base directory for outputs when explicit paths are not given
+output_dir = "."              # Base directory for outputs when explicit paths are not given
 # primary_jsonl_name is filled by builders when default_jsonl_prompt is used
 compress_jsonl = false        # Gzip-compress the primary JSONL when true
 jsonl_basename = "data"       # Default basename for JSONL when factories derive paths
+
+[sinks.defaults]
+# Per-kind defaults keyed by SinkSpec.kind; mostly useful for plugins or to
+# avoid repetition across multiple specs.
+[sinks.defaults.default_jsonl_prompt]
+# heading_fmt = "### {path} [chunk {chunk}]"
+
+[sinks.defaults.parquet_dataset]
+# compression = "zstd"
+# row_group_size = 8000
 
 [sinks.prompt]
 heading_fmt = "### {path} [chunk {chunk}]"  # Template for headings in the prompt text sink
@@ -178,9 +219,9 @@ parallel_post = false        # Use process-based parallelism for post-QC when tr
 # post_executor_kind = "process" # Executor kind override for post-QC scoring
 # post_max_workers = 4        # Maximum workers for post-QC (defaults to pipeline.max_workers)
 # post_submit_window = 16     # Submit window for post-QC executor (defaults to pipeline.submit_window)
-# scorer is wired via registry in Python (kept out of TOML)
+# scorer_id selects a scorer (None = registry default); scorer_options passes scorer-specific settings
 
-[qc.heuristics]
+[qc.scorer_options.heuristics]
 target_code_min = 2000       # Lower bound of target token band for code-like content
 target_code_max = 4000       # Upper bound of target token band for code-like content
 target_log_min = 1000        # Lower bound of target token band for log/structured content
@@ -214,13 +255,15 @@ logger_name = "repocapsule"  # Base logger name used for all repocapsule logs
 # Metadata stored in run headers and dataset cards
 # ---------------------------------------------------------------------------
 [metadata]
-primary_jsonl = "out/data.jsonl"     # Canonical path to the primary JSONL (used in run headers and dataset cards)
-prompt_path = "out/data.prompt.txt"  # Canonical path to the prompt text file
-repo_url = "https://github.com/example/repo" # Source repository URL associated with this run
+# Unset by default; runner helpers often fill these from sink paths or GitHub metadata.
+# primary_jsonl = "out/data.jsonl"     # Canonical path to the primary JSONL (used in run headers and dataset cards)
+# prompt_path = "out/data.prompt.txt"  # Canonical path to the prompt text file
+# repo_url = "https://github.com/example/repo" # Source repository URL associated with this run
 
 [metadata.extra]
-run_label = "example-run"    # Arbitrary label for this run (for your tracking)
-notes = "Free-form metadata carried through RunSummaryMeta." # Additional notes stored in run summaries
+# Arbitrary key/value metadata to carry through RunSummaryMeta and dataset-card fragments.
+# run_label = "example-run"
+# notes = "Free-form metadata carried through RunSummaryMeta."
 
 # ---------------------------------------------------------------------------
 # Dataset card guidance (Hugging Face style)

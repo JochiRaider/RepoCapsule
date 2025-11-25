@@ -14,6 +14,7 @@ from repocapsule.core.registries import (
     default_source_registry,
 )
 from repocapsule.core.config import RepocapsuleConfig, SourceSpec, SinkSpec
+from repocapsule.core.interfaces import SourceFactoryContext, SinkFactoryContext
 
 
 class FakeEntryPoint:
@@ -71,16 +72,23 @@ def test_source_registry_unknown_kind_raises():
     registry = default_source_registry()
     cfg = RepocapsuleConfig()
     cfg.sources.specs = (SourceSpec(kind="does_not_exist", options={}),)
+    ctx = SourceFactoryContext(
+        repo_context=None,
+        http_client=None,
+        http_config=cfg.http,
+        source_defaults=cfg.sources.defaults,
+    )
     with pytest.raises(ValueError):
-        registry.build_all(cfg)
+        registry.build_all(ctx, cfg.sources.specs)
 
 
 def test_sink_registry_unknown_kind_raises():
     registry = default_sink_registry()
     cfg = RepocapsuleConfig()
     cfg.sinks.specs = (SinkSpec(kind="does_not_exist", options={}),)
+    ctx = SinkFactoryContext(repo_context=None, sink_config=cfg.sinks)
     with pytest.raises(ValueError):
-        registry.build_all(cfg)
+        registry.build_all(ctx, cfg.sinks.specs)
 
 
 def test_default_source_registry_has_expected_ids():

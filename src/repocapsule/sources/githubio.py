@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..core import safe_http
 from ..core.interfaces import FileItem, RepoContext, Source
-from ..cli.licenses import detect_license_in_zip, apply_license_to_context
+from ..core.licenses import detect_license_in_zip, apply_license_to_context
 from ..core.log import get_logger
 from ..core.naming import normalize_extensions
 

@@ -1,6 +1,11 @@
 # chunk.py
 # SPDX-License-Identifier: MIT
+"""Token-aware document and code chunking utilities.
 
+Provides tokenizer helpers, Markdown and reStructuredText block
+splitters, semantic refinement utilities, and high-level APIs to
+chunk text into token-bounded spans suitable for LLM ingestion.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,12 +31,18 @@ _TOKENIZER_CACHE: Dict[str, Any] = {}
 # Tokenizer helpers
 # -----------------
 def _get_tokenizer(tokenizer_name: Optional[str] = None):
-    """
-    Return a tokenizer object if tiktoken is available; else None.
+    """Return a tiktoken tokenizer for the given name if available.
 
-    tokenizer_name examples:
-      - an encoding like "cl100k_base" (safe default)
-      - a model name that tiktoken recognizes
+
+    Args:
+        tokenizer_name (str | None): Optional encoding or model
+            name understood by tiktoken. If omitted, a cached
+            default encoding is used.
+
+    Returns:
+        Any | None: Tokenizer object compatible with tiktoken's
+            ``encode`` API, or None if tiktoken is not installed
+            or the name cannot be resolved.
     """
     global _DEFAULT_TOKENIZER
     if not _HAVE_TIKTOKEN:
@@ -67,10 +78,20 @@ _PUNCT = set("()[]{}<>=:+-*/%,.;$#@\\|`~^")
 
 
 def _char_token_ratio(text: str,kind: str) -> float:
-    """Return an estimated *chars per token* ratio.
+    """Estimate the character-per-token ratio for text.
 
-    Heuristic: code has more symbols and shorter identifiers, so fewer
-    chars per token. Clamp into a reasonable band.
+
+    Heuristic: code typically has more symbols and shorter
+    identifiers, so it uses fewer characters per token. The result
+    is clamped into a reasonable range.
+
+    Args:
+        text (str): Sample text to analyze.
+        kind (str): Content kind, usually ``"code"`` or ``"doc"``,
+            used to tune the heuristic.
+
+    Returns:
+        float: Approximate number of characters per token.
     """
     n = len(text)
     if n == 0:
@@ -86,8 +107,20 @@ def _char_token_ratio(text: str,kind: str) -> float:
 
 
 def count_tokens(text: str, tokenizer=None, mode: str="auto") -> int:
-    """
-    Count tokens using tiktoken if available; otherwise use a fast estimate.
+    """Count tokens using tiktoken or a fast heuristic fallback.
+
+
+    Args:
+        text (str): Text to tokenize.
+        tokenizer: Optional tokenizer object compatible with
+            tiktoken's ``encode`` API. If omitted, a cached
+            default tokenizer is used when available.
+        mode (str): Content kind hint such as ``"doc"``,
+            ``"code"``, or ``"auto"``, used to tune heuristic
+            estimates.
+
+    Returns:
+        int: Estimated or exact token count for the given text.
     """
     ratio = _char_token_ratio(text,mode)
     if tokenizer is None:
@@ -107,6 +140,18 @@ def count_tokens(text: str, tokenizer=None, mode: str="auto") -> int:
 # ---------------
 @dataclass(slots=True, frozen=True)
 class Block:
+    """Immutable text block produced by a splitter.
+
+
+    Attributes:
+        text (str): Block contents.
+        start (int): Start offset of the block in the original
+            text.
+        end (int): End offset of the block in the original text.
+        tokens (int): Approximate token count for the block.
+        kind (str): Logical kind for the block, such as
+            ``"text"``, ``"code"``, or ``"heading"``.
+    """    
     text: str
     start: int
     end: int
@@ -128,11 +173,20 @@ _PARA_SPLITTER = re.compile(r'\n[ \t]*\n+')
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])(?:["\')\]]+)?\s+(?=[A-Z0-9])')
 
 def _split_markdown_blocks(text: str, tokenizer) -> List[Block]:
-    """
-    Markdown block splitter:
-      - Emits separate blocks for ATX headings, Setext headings, and fenced code blocks.
-      - Everything else accumulates into paragraph-ish blocks.
-    This is not a full CommonMark parser; it's tuned for chunk boundaries.
+    """Split Markdown text into logical blocks.
+
+
+    The splitter recognizes ATX and Setext headings and fenced
+    code blocks. Everything else is grouped into paragraph-like
+    text blocks.
+
+    Args:
+        text (str): Full Markdown document.
+        tokenizer: Tokenizer used to compute approximate token
+            counts.
+
+    Returns:
+        list[Block]: Sequence of blocks covering the input text.
     """
     lines = text.splitlines(keepends=True)
     n = len(lines)
@@ -234,6 +288,17 @@ _RST_CODE_DIRECTIVES = {
 
 
 def _leading_spaces(s: str) -> int:
+    """Compute indentation width in spaces for a line.
+
+
+    Tabs are treated as four spaces.
+
+    Args:
+        s (str): Line of text.
+
+    Returns:
+        int: Number of leading spaces after expanding tabs.
+    """
     count = 0
     for ch in s:
         if ch == " ":
@@ -246,20 +311,37 @@ def _leading_spaces(s: str) -> int:
 
 
 def _underline_long_enough(adorn_line: str, title_line: str) -> bool:
-    # Underline must be at least as long as title text (Docutils quickref).  
+    """Return whether an RST underline is long enough for a title.
+
+
+    Args:
+        adorn_line (str): Line containing adornment characters.
+        title_line (str): Line containing the section title.
+
+    Returns:
+        bool: True if the underline length satisfies Docutils'
+            section title rule.
+    """  
     tlen = len(title_line.rstrip("\r\n"))
     ulen = len(adorn_line.rstrip("\r\n").strip())
     return ulen >= tlen
 
 
 def _split_rst_blocks(text: str, tokenizer) -> List[Block]:
-    """
-    reStructuredText block splitter. Recognizes:
-      - Section titles with underline-only or overline+title+underline (same char).
-      - Literal blocks introduced by a paragraph ending with '::' followed by indented lines.
-      - Directives ('.. code::', '.. code-block::', etc.) with indented bodies.
+    """Split reStructuredText into logical blocks.
 
-    Based on Docutils/Sphinx rules for adornments, literal blocks, and directives.
+
+    The splitter recognizes section titles (underline-only or
+    overline/title/underline), literal blocks introduced by ``::``,
+    and directives such as ``.. code::`` with indented bodies.
+
+    Args:
+        text (str): Full reStructuredText document.
+        tokenizer: Tokenizer used to compute approximate token
+            counts.
+
+    Returns:
+        list[Block]: Sequence of blocks covering the input text.
     """
     lines = text.splitlines(keepends=True)
     n = len(lines)
@@ -415,13 +497,30 @@ _SPLITTER_REGISTRY: Dict[str, BlockSplitter] = {
 }    
 
 def register_doc_splitter(fmt_name: str, splitter: BlockSplitter) -> None:
-    """Register (or override) a document splitter at runtime."""
+    """Register or override a document block splitter.
+
+
+    Args:
+        fmt_name (str): Canonical name for the document format.
+        splitter (BlockSplitter): Callable that splits text into
+            :class:`Block` objects.
+    """
     _SPLITTER_REGISTRY[fmt_name.strip().lower()] = splitter
 
 def split_doc_blocks(text: str, fmt: Optional[str], tokenizer) -> List[Block]:
-    """
-    Split a documentation file into logical blocks based on a **registered** format.
-    Unknown formats fall back to Markdown.
+    """Split documentation text into blocks using a registered splitter.
+
+
+    Args:
+        text (str): Full document text.
+        fmt (str | None): Registered format name such as
+            ``"markdown"`` or ``"restructuredtext"``. If None or
+            unknown, Markdown is used as a fallback.
+        tokenizer: Tokenizer used to compute approximate token
+            counts.
+
+    Returns:
+        list[Block]: Sequence of blocks covering the input text.
     """
     fmt_l = (fmt or "markdown").strip().lower()
     splitter = _SPLITTER_REGISTRY.get(fmt_l, _split_markdown_blocks)
@@ -432,29 +531,21 @@ def split_doc_blocks(text: str, fmt: Optional[str], tokenizer) -> List[Block]:
 # -------------
 @dataclass
 class ChunkPolicy:
-    """
-    Chunking policy with sensible defaults for documentation.
+    """Configuration for chunking text into token-bounded spans.
 
-    Parameters
-    ----------
-    mode : "doc" or "code"
-        - "doc": uses block-level packing with doc splitters
-        - "code": uses line-based packing tuned for code
-    target_tokens : int
-        Desired chunk size.
-    overlap_tokens : int
-        Number of tokens to overlap between adjacent chunks (0 to disable).
-    min_tokens : int
-        Minimum chunk size. If a block would make the previous chunk too short,
-        it is appended to reach the minimum.
-    semantic_doc : bool
-        Enables optional sentence/paragraph-aware splitting for doc mode.
-    semantic_tokens_per_block : Optional[int]
-        Target token count for semantic sub-blocks when `semantic_doc` is True.
 
-    Notes
-    -----
-    For book-style prose, a target of ~1500-2000 tokens is often ideal.
+    Attributes:
+        mode (str): Chunking mode, ``"doc"`` for documentation
+            style text or ``"code"`` for source code.
+        target_tokens (int): Desired token count for each chunk.
+        overlap_tokens (int): Number of tokens to overlap between
+            consecutive chunks.
+        min_tokens (int): Minimum token count for a chunk before
+            it will be flushed.
+        semantic_doc (bool): Whether to apply optional paragraph
+            and sentence-aware refinement in documentation mode.
+        semantic_tokens_per_block (int | None): Target token count
+            for semantic sub-blocks when ``semantic_doc`` is True.
     """
     mode: str = "doc"
     target_tokens: int = 1700
@@ -465,6 +556,16 @@ class ChunkPolicy:
 
 
 def _semantic_block_limit(pol: ChunkPolicy) -> int:
+    """Compute the maximum token count for semantic sub-blocks.
+
+
+    Args:
+        pol (ChunkPolicy): Chunking policy providing semantic
+            limits.
+
+    Returns:
+        int: Token limit to use when splitting text blocks.
+    """    
     base = pol.semantic_tokens_per_block or 0
     if base <= 0:
         base = min(pol.target_tokens, 600)
@@ -473,6 +574,19 @@ def _semantic_block_limit(pol: ChunkPolicy) -> int:
 
 
 def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
+    """Compute paragraph span offsets for a text blob.
+
+
+    Paragraphs are separated by blank lines. If no separators are
+    found, a single span covering the entire text is returned.
+
+    Args:
+        text (str): Text to segment into paragraphs.
+
+    Returns:
+        list[tuple[int, int]]: Character ranges for each paragraph
+            as ``(start, end)`` offsets.
+    """    
     spans: List[Tuple[int, int]] = []
     last = 0
     for match in _PARA_SPLITTER.finditer(text):
@@ -487,6 +601,22 @@ def _paragraph_spans(text: str) -> List[Tuple[int, int]]:
 
 
 def _split_sentences(segment_text: str, abs_start: int, limit_tokens: int, tokenizer) -> List[Block]:
+    """Split a paragraph segment into sentence-based blocks.
+
+
+    Sentences are grouped so that each block stays under the given
+    token limit where possible.
+
+    Args:
+        segment_text (str): Paragraph text to split.
+        abs_start (int): Absolute character offset of the segment
+            in the original document.
+        limit_tokens (int): Target maximum tokens per block.
+        tokenizer: Tokenizer used to estimate token counts.
+
+    Returns:
+        list[Block]: Sentence-grouped blocks covering the segment.
+    """    
     spans: List[Tuple[int, int]] = []
     last = 0
     for match in _SENTENCE_BOUNDARY.finditer(segment_text):
@@ -539,6 +669,26 @@ def _split_paragraph_span(
     limit_tokens: int,
     tokenizer,
 ) -> List[Block]:
+    """Split a paragraph span into semantic sub-blocks.
+
+
+    Depending on token counts and sentence boundaries, the span is
+    either returned as a single block or further split.
+
+    Args:
+        block_text (str): Full block text containing the span.
+        span_start (int): Start offset of the span within
+            ``block_text``.
+        span_end (int): End offset of the span within
+            ``block_text``.
+        block_abs_start (int): Absolute offset of ``block_text``
+            in the original document.
+        limit_tokens (int): Target maximum tokens per sub-block.
+        tokenizer: Tokenizer used to estimate token counts.
+
+    Returns:
+        list[Block]: One or more blocks covering the span.
+    """
     if span_end <= span_start:
         return []
     segment = block_text[span_start:span_end]
@@ -550,6 +700,20 @@ def _split_paragraph_span(
 
 
 def _split_text_block_semantic(block: Block, limit_tokens: int, tokenizer) -> List[Block]:
+    """Refine a text block into smaller semantic sub-blocks.
+
+
+    Paragraphs and sentences are used as boundaries while enforcing
+    a token limit per block.
+
+    Args:
+        block (Block): Input text block to refine.
+        limit_tokens (int): Target maximum tokens per sub-block.
+        tokenizer: Tokenizer used to estimate token counts.
+
+    Returns:
+        list[Block]: Refined blocks covering the original text.
+    """    
     spans = _paragraph_spans(block.text)
     refined: List[Block] = []
     for span_start, span_end in spans:
@@ -571,6 +735,22 @@ def _semantic_refine_doc_blocks(
     policy: ChunkPolicy,
     tokenizer,
 ) -> List[Block]:
+    """Apply semantic refinement to documentation blocks.
+
+
+    When ``policy.semantic_doc`` is enabled, large text blocks are
+    further split into paragraph or sentence-based sub-blocks.
+
+    Args:
+        blocks (list[Block]): Candidate blocks from a document
+            splitter.
+        policy (ChunkPolicy): Chunking policy controlling
+            refinement.
+        tokenizer: Tokenizer used to estimate token counts.
+
+    Returns:
+        list[Block]: Original or refined blocks.
+    """    
     if not policy.semantic_doc:
         return blocks
     limit = _semantic_block_limit(policy)
@@ -584,7 +764,19 @@ def _semantic_refine_doc_blocks(
 
 
 def _take_tail_chars_for_overlap(text: str, approx_tokens: int, mode: str) -> str:
-    """Return an approximate tail substring corresponding to `approx_tokens`."""
+    """Return a tail substring approximating the given token budget.
+
+
+    Args:
+        text (str): Source text to take the tail from.
+        approx_tokens (int): Desired number of tokens to retain.
+        mode (str): Content kind hint passed to the token
+            heuristic.
+
+    Returns:
+        str: Tail substring whose length roughly matches the token
+            budget.
+    """
     if not text or approx_tokens <= 0:
         return ""
     
@@ -606,9 +798,26 @@ def iter_packed_blocks(
     tokenizer,
     mode,
 ) -> Iterator[Tuple[str, int, int, int]]:
-    """
-    Pack block list into chunks near target_tokens with optional overlap.
-    Yields (chunk_text, start_pos, end_pos, n_tokens) as soon as each chunk is ready.
+    """Pack blocks into chunks near the target token size.
+
+
+    Blocks are accumulated until the target token count is reached,
+    optionally yielding overlapping context between successive
+    chunks.
+
+    Args:
+        blocks (list[Block]): Sequence of input blocks.
+        target_tokens (int): Desired token count per chunk.
+        overlap_tokens (int): Number of tokens to overlap between
+            successive chunks.
+        min_tokens (int): Minimum token count before a chunk is
+            flushed.
+        tokenizer: Tokenizer used when estimating overlap lengths.
+        mode: Content kind hint such as ``"doc"`` or ``"code"``.
+
+    Yields:
+        tuple[str, int, int, int]: Chunk text, start offset, end
+            offset, and token count.
     """
     cur_buf: List[str] = []
     cur_start: Optional[int] = None
@@ -701,9 +910,19 @@ def iter_packed_blocks(
 
 
 def _split_code_lines(text: str, tokenizer) -> List[Block]:
-    """
-    line-based code splitter: keeps contiguous sections together,
-    but prefers blank lines as soft boundaries.
+    """Split code text into line-based blocks.
+
+
+    Contiguous sections of code are grouped together, with runs of
+    blank lines treated as soft boundaries.
+
+    Args:
+        text (str): Source code to split.
+        tokenizer: Tokenizer used to compute approximate token
+            counts.
+
+    Returns:
+        list[Block]: Code blocks covering the input text.
     """
     lines = text.splitlines(keepends=True)
     blocks: List[Block] = []
@@ -746,8 +965,27 @@ def iter_chunk_dicts(
     policy: Optional[ChunkPolicy] = None,
     tokenizer_name: Optional[str] = None,
 ) -> Iterator[dict]:
-    """
-    Streaming chunk generator. Yields dicts with the same shape as chunk_text().
+    """Yield chunk dictionaries for the given text.
+
+
+    This is a streaming interface that mirrors :func:`chunk_text`
+    but yields chunks one at a time.
+
+    Args:
+        text (str): Full input text to chunk.
+        mode (str): Chunking mode, ``"doc"`` or ``"code"``.
+        fmt (str | None): Document format hint used in
+            documentation mode, such as ``"markdown"`` or
+            ``"restructuredtext"``.
+        policy (ChunkPolicy | None): Optional custom chunking
+            policy. If omitted, a default policy is constructed
+            from ``mode``.
+        tokenizer_name (str | None): Optional tokenizer name to
+            pass to the tokenizer factory.
+
+    Yields:
+        dict: Chunk metadata with keys ``"text"``, ``"n_tokens"``,
+            ``"start"``, and ``"end"``.
     """
     pol = policy or ChunkPolicy(mode=mode)
     tok = _get_tokenizer(tokenizer_name)
@@ -786,11 +1024,28 @@ def chunk_text(
     policy: Optional[ChunkPolicy] = None,
     tokenizer_name: Optional[str] = None,
 ) -> List[dict]:
-    """
-    High-level chunker. Returns a list of dicts:
-      { "text": str, "n_tokens": int, "start": int, "end": int }
+    """Chunk text into a list of token-bounded spans.
 
-    Set `fmt` to "markdown" / "restructuredtext" for docs.
+
+    Each chunk is returned as a dictionary containing the text,
+    token count, and character offsets into the original string.
+
+    Args:
+        text (str): Full input text to chunk.
+        mode (str): Chunking mode, ``"doc"`` or ``"code"``.
+        fmt (str | None): Document format hint used in
+            documentation mode, such as ``"markdown"`` or
+            ``"restructuredtext"``.
+        policy (ChunkPolicy | None): Optional custom chunking
+            policy. If omitted, a default policy is constructed
+            from ``mode``.
+        tokenizer_name (str | None): Optional tokenizer name to
+            pass to the tokenizer factory.
+
+    Returns:
+        list[dict]: Chunk metadata dictionaries with keys
+            ``"text"``, ``"n_tokens"``, ``"start"``, and
+            ``"end"``.
     """
     return list(
         iter_chunk_dicts(
@@ -807,8 +1062,16 @@ def chunk_text(
 # Convenience IO
 # -------------
 def detect_fmt_from_lang(lang: Optional[str]) -> str:
-    """
-    Map a normalized language label to a doc format string for splitters.
+    """Infer a document format name from a language label.
+
+
+    Args:
+        lang (str | None): Normalized language or filetype label,
+            such as ``"md"``, ``"rst"``, or ``"text"``.
+
+    Returns:
+        str: Splitter format name, for example ``"markdown"`` or
+            ``"restructuredtext"``.
     """
     l = (lang or "").strip().lower()
     if l in {"rst", "restructuredtext"}:

@@ -58,3 +58,53 @@ def test_safe_http_allows_public_ip(monkeypatch):
 def test_hosts_related(src, dest, expected):
     client = SafeHttpClient(allowed_redirect_suffixes=("github.com",))
     assert client._hosts_related(src, dest) is expected
+
+
+def test_open_collects_redirect_log(monkeypatch):
+    client = SafeHttpClient()
+    responses = []
+
+    class FakeResponse:
+        def __init__(self, status, headers):
+            self.status = status
+            self.headers = headers
+            self.reason = "OK"
+
+        def getheader(self, name, default=None):
+            return self.headers.get(name, default)
+
+        def close(self):
+            pass
+
+    class FakeConnection:
+        def __init__(self):
+            self._response = responses.pop(0)
+
+        def request(self, *args, **kwargs):
+            return None
+
+        def getresponse(self):
+            return self._response
+
+        def close(self):
+            pass
+
+    def fake_resolve(hostname, url=None):
+        return ["8.8.8.8"]
+
+    monkeypatch.setattr(client, "_resolve_ips", fake_resolve)
+    monkeypatch.setattr(client, "_build_connection", lambda **kwargs: FakeConnection())
+
+    responses.extend(
+        [
+            FakeResponse(302, {"Location": "https://example.com/next"}),
+            FakeResponse(200, {}),
+        ]
+    )
+
+    redirects: list[tuple[str, str, int]] = []
+    resp = client.open("http://example.com/start", timeout=1, redirect_log=redirects)
+
+    assert resp.status == 200
+    assert redirects == [("http://example.com/start", "https://example.com/next", 302)]
+    assert resp.redirects == tuple(redirects)

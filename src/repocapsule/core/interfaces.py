@@ -17,8 +17,16 @@ from typing import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
-    from .config import RepocapsuleConfig, FileProcessingConfig, SourceSpec, SinkSpec
+    from pathlib import Path
+    from .config import (
+        RepocapsuleConfig,
+        FileProcessingConfig,
+        SourceSpec,
+        SinkSpec,
+        HttpConfig,
+    )
     from .factories import SinkFactoryResult
+    from .safe_http import SafeHttpClient
 
 
 # -----------------------------------------------------------------------------
@@ -240,6 +248,10 @@ class Sink(Protocol):
 class QualityScorer(Protocol):
     """
     Minimal contract for quality scorers used in inline or post-processing modes.
+
+    Implementers may optionally provide:
+    - ``clone_for_parallel()`` → return a fresh scorer for worker processes in parallel post-QC.
+    - ``reset_state()`` → clear incremental state before rescoring JSONL for CSV export.
     """
 
     def score_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -248,12 +260,15 @@ class QualityScorer(Protocol):
     def score_jsonl_path(self, path: str) -> Iterable[Dict[str, Any]]:
         """Iterate QC rows for every record within a JSONL file."""
 
+    def clone_for_parallel(self) -> "QualityScorer":  # pragma: no cover - optional
+        ...
+
 
 @runtime_checkable
 class SourceFactory(Protocol):
     id: str
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Iterable["Source"]:
+    def build(self, ctx: "SourceFactoryContext", spec: "SourceSpec") -> Iterable["Source"]:
         ...
 
 
@@ -261,7 +276,7 @@ class SourceFactory(Protocol):
 class SinkFactory(Protocol):
     id: str
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SinkSpec") -> "SinkFactoryResult":
+    def build(self, ctx: "SinkFactoryContext", spec: "SinkSpec") -> "SinkFactoryResult":
         ...
 
 
@@ -283,7 +298,7 @@ class FileMiddleware(Protocol):
     Returning None drops all records for that item.
     """
 
-    def process(self, item: "FileItem", records: Iterable[Record]) -> Optional[Iterable[Record]]:
+    def process(self, item: Any, records: Iterable[Record]) -> Optional[Iterable[Record]]:
         ...
 
 
@@ -295,6 +310,31 @@ class ConcurrencyProfile(Protocol):
 
     preferred_executor: Optional[str]  # "thread" or "process"
     cpu_intensive: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFactoryContext:
+    """
+    Narrowed view of cross-cutting source settings passed to SourceFactory.build.
+
+    Keeps factories decoupled from the full RepocapsuleConfig so they can be
+    reused in other environments and by plugins.
+    """
+
+    repo_context: Optional[RepoContext]
+    http_client: Optional["SafeHttpClient"]
+    http_config: "HttpConfig"
+    source_defaults: Mapping[str, Mapping[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class SinkFactoryContext:
+    """
+    Narrowed view of sink-related settings passed to SinkFactory.build.
+    """
+
+    repo_context: Optional[RepoContext]
+    sink_config: "SinkConfig"
 
 
 __all__ = [
@@ -309,6 +349,8 @@ __all__ = [
     "QualityScorer",
     "SourceFactory",
     "SinkFactory",
+    "SourceFactoryContext",
+    "SinkFactoryContext",
     "RecordFilter",
     "RecordObserver",
     "RecordMiddleware",

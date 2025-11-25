@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Iterable, Sequence, Dict, List, Tuple, Any, Callable
 from pathlib import Path
 import pickle
 
 from .config import RepocapsuleConfig, FileProcessingConfig
-from .builder import PipelinePlan, build_pipeline_plan
+from .builder import PipelinePlan, PipelineOverrides, PipelineRuntime, build_pipeline_plan
 from .interfaces import (
     Source,
     Sink,
@@ -38,6 +38,34 @@ log = get_logger(__name__)
 class _WorkItem:
     item: Any
     ctx: Optional[RepoContext]
+
+
+class _FuncRecordMiddleware:
+    """Internal adapter to treat bare functions as RecordMiddleware."""
+
+    def __init__(self, fn: Callable[[Record], Optional[Record]]) -> None:
+        self._fn = fn
+
+    def process(self, record: Record) -> Optional[Record]:
+        return self._fn(record)
+
+
+class _FuncFileMiddleware:
+    """Internal adapter to treat bare functions as FileMiddleware."""
+
+    def __init__(self, fn: Callable[[Any, Iterable[Record]], Optional[Iterable[Record]]]) -> None:
+        self._fn = fn
+
+    def process(self, item: Any, records: Iterable[Record]) -> Optional[Iterable[Record]]:
+        return self._fn(item, records)
+
+
+def _coerce_record_middleware(mw: RecordMiddleware | Callable[[Record], Any]) -> RecordMiddleware:
+    return mw if hasattr(mw, "process") else _FuncRecordMiddleware(mw)  # type: ignore[arg-type]
+
+
+def _coerce_file_middleware(mw: FileMiddleware | Callable[[Any, Iterable[Record]], Any]) -> FileMiddleware:
+    return mw if hasattr(mw, "process") else _FuncFileMiddleware(mw)  # type: ignore[arg-type]
 
 
 @dataclass
@@ -107,9 +135,9 @@ def _open_source_with_stack(stack: ExitStack, src: Source) -> Source:
         stack.callback(close)  
     return src
 
-def _prepare_sinks(stack: ExitStack, sinks: Sequence[Sink], ctx: Optional[RepoContext]) -> List[Sink]:
+def _prepare_sinks(stack: ExitStack, sinks: Sequence[Sink], ctx: Optional[RepoContext], stats: PipelineStats) -> List[Sink]:
     """
-    Open sinks exactly once with RepoContext if supported.
+    Open sinks exactly once with RepoContext if supported; record failures in stats.
     """
     open_sinks: List[Sink] = []
     for s in sinks:
@@ -125,6 +153,7 @@ def _prepare_sinks(stack: ExitStack, sinks: Sequence[Sink], ctx: Optional[RepoCo
             open_sinks.append(s)
         except Exception as e:
             log.warning("Sink %s failed to open: %s", getattr(s, "__class__", type(s)).__name__, e)
+            stats.sink_errors += 1
     return open_sinks
 
 
@@ -139,15 +168,15 @@ def _ext_key(path: str) -> str:
         return ""
 
 
-def _build_file_processing_config(cfg: RepocapsuleConfig) -> FileProcessingConfig:
+def _build_file_processing_config(cfg: RepocapsuleConfig, runtime: PipelineRuntime) -> FileProcessingConfig:
     """
     Create a sanitized config containing only per-file knobs for worker processes.
     """
-
+    pipeline_cfg = replace(cfg.pipeline, bytes_handlers=runtime.bytes_handlers)
     return FileProcessingConfig(
         decode=cfg.decode,
         chunk=cfg.chunk,
-        pipeline=cfg.pipeline,
+        pipeline=pipeline_cfg,
     )
 
 
@@ -157,12 +186,19 @@ def _build_file_processing_config(cfg: RepocapsuleConfig) -> FileProcessingConfi
 
 
 class PipelineEngine:
+    """
+    Executes a prepared PipelinePlan.
+
+    Record middlewares should implement ``process(record) -> Optional[Record]``; file middlewares
+    should implement ``process(item, records) -> Optional[Iterable[Record]]``. Simple callables are
+    wrapped automatically.
+    """
     def __init__(self, plan: PipelinePlan) -> None:
         self.plan = plan
-        self.config = plan.config
+        self.config = plan.spec
         self.stats = PipelineStats()
         self.log = get_logger(__name__)
-        self._qc_hook_factory = getattr(plan, "qc_hook_factory", None)
+        self._qc_hook_factory = getattr(plan.runtime, "qc_hook_factory", None)
         self._qc_hooks: Optional[Tuple[Callable[[Record], bool], Callable[[Record], None]]] = None
         self.before_record_hooks: List[Callable[[Record], Record]] = []
         self.after_record_hooks: List[Callable[[Record], Record]] = []
@@ -172,6 +208,27 @@ class PipelineEngine:
         self.before_source_hooks: List[Callable[[Source], None]] = []
         self.after_source_hooks: List[Callable[[Source], None]] = []
         self._qc_middleware: Optional[RecordMiddleware] = None
+        self._middlewares_normalized = False
+
+    def add_record_middleware(self, middleware: RecordMiddleware | Callable[[Record], Any]) -> None:
+        self.record_middlewares.append(_coerce_record_middleware(middleware))
+        self._middlewares_normalized = False
+
+    def add_file_middleware(
+        self,
+        middleware: FileMiddleware | Callable[[Any, Iterable[Record]], Any],
+    ) -> None:
+        self.file_middlewares.append(_coerce_file_middleware(middleware))
+        self._middlewares_normalized = False
+
+    def _normalize_middlewares(self) -> None:
+        if self._middlewares_normalized:
+            return
+
+        self.record_middlewares = [_coerce_record_middleware(mw) for mw in self.record_middlewares]
+        self.file_middlewares = [_coerce_file_middleware(mw) for mw in self.file_middlewares]
+
+        self._middlewares_normalized = True
 
     def _prepare_qc(self) -> None:
         cfg = self.config
@@ -224,19 +281,19 @@ class PipelineEngine:
                 )
                 return None
 
-        self.record_middlewares.append(_qc_middleware)
-        self._qc_middleware = _qc_middleware
+        self.add_record_middleware(_qc_middleware)
+        self._qc_middleware = self.record_middlewares[-1]
         self._qc_hooks = (filt, obs)
 
     def _apply_middlewares(self, record: Record) -> Optional[Record]:
         current = record
         for middleware in self.record_middlewares:
             try:
-                current = middleware.process(current) if hasattr(middleware, "process") else middleware(current)  # type: ignore[arg-type]
+                current = middleware.process(current)
             except Exception as exc:  # noqa: BLE001
                 self.log.warning(
                     "record middleware %s failed: %s",
-                    getattr(middleware, "__name__", middleware),
+                    getattr(middleware, "__name__", middleware.__class__.__name__),
                     exc,
                 )
                 return None
@@ -248,11 +305,11 @@ class PipelineEngine:
         current = records
         for middleware in self.file_middlewares:
             try:
-                current = middleware.process(item, current) if hasattr(middleware, "process") else middleware(item, current)  # type: ignore[arg-type]
+                current = middleware.process(item, current)
             except Exception as exc:  # noqa: BLE001
                 self.log.warning(
                     "file middleware %s failed for %s: %s",
-                    getattr(middleware, "__name__", middleware),
+                    getattr(middleware, "__name__", middleware.__class__.__name__),
                     getattr(item, "path", "<unknown>"),
                     exc,
                 )
@@ -277,11 +334,10 @@ class PipelineEngine:
 
     def _make_processor(self, *, materialize: bool) -> _ProcessFileCallable:
         cfg = self.config
-        extractor = self.plan.file_extractor or cfg.pipeline.file_extractor
+        extractor = self.plan.runtime.file_extractor or cfg.pipeline.file_extractor
         if extractor is None:
             extractor = DefaultExtractor()
-            cfg.pipeline.file_extractor = extractor
-        file_cfg = _build_file_processing_config(cfg)
+        file_cfg = _build_file_processing_config(cfg, self.plan.runtime)
         return _ProcessFileCallable(
             config=file_cfg,
             file_extractor=extractor,
@@ -292,7 +348,7 @@ class PipelineEngine:
         exec_cfg = getattr(self.plan.runtime, "executor_config", None)
         fail_fast = getattr(self.plan.runtime, "fail_fast", False)
         if exec_cfg is None:
-            exec_cfg, fail_fast = resolve_pipeline_executor_config(self.config, runtime=self.plan)
+            exec_cfg, fail_fast = resolve_pipeline_executor_config(self.config, runtime=self.plan.runtime)
         return Executor(exec_cfg), fail_fast
 
     def _write_records(
@@ -473,6 +529,15 @@ class PipelineEngine:
             if recs is not None:
                 self._write_records(item, recs, sinks=sinks)
 
+        def _on_submit_error(work: _WorkItem, exc: BaseException) -> None:
+            log.warning(
+                "Failed to submit %s to executor: %s",
+                getattr(work.item, "path", "<unknown>"),
+                exc,
+            )
+            _log_pickling_hint(exc)
+            stats.source_errors += 1
+
         try:
             executor.map_unordered(
                 _items_with_stats(),
@@ -480,6 +545,7 @@ class PipelineEngine:
                 _on_result,
                 fail_fast=fail_fast,
                 on_error=_on_worker_error,
+                on_submit_error=_on_submit_error,
             )
         except Exception as exc:
             _log_pickling_hint(exc)
@@ -531,13 +597,14 @@ class PipelineEngine:
         stats = self.stats
         self._prepare_qc()
         self._attach_qc_hooks()
+        self._normalize_middlewares()
 
         with ExitStack() as stack:
             open_sources: List[Source] = [
-                _open_source_with_stack(stack, src) for src in self.plan.sources
+                _open_source_with_stack(stack, src) for src in self.plan.runtime.sources
             ]
             initial_ctx: Optional[RepoContext] = cfg.sinks.context
-            open_sinks: List[Sink] = _prepare_sinks(stack, self.plan.sinks, initial_ctx)
+            open_sinks: List[Sink] = _prepare_sinks(stack, self.plan.runtime.sinks, initial_ctx, stats)
             if not open_sinks:
                 self.log.warning("No sinks are open; processed records will be dropped.")
 
@@ -580,9 +647,9 @@ class PipelineEngine:
 # Public API
 # ---------------------------------------------------------------------------
 
-def run_pipeline(*, config: RepocapsuleConfig) -> Dict[str, int]:
+def run_pipeline(*, config: RepocapsuleConfig, overrides: PipelineOverrides | None = None) -> Dict[str, int]:
     """Run the end-to-end pipeline described by ``config``."""
-    plan = build_pipeline_plan(config)
+    plan = build_pipeline_plan(config, overrides=overrides)
     engine = PipelineEngine(plan)
     stats = engine.run()
     return stats.as_dict()

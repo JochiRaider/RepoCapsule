@@ -373,8 +373,20 @@ class _TreeReader:
 
 
 def detect_license_in_zip(zip_path: str, subpath: Optional[str]) -> DetectionResult:
-    """
-    Detect license metadata inside a GitHub zipball (root or subpath).
+    """Detect license metadata inside a GitHub zipball.
+
+    Scans the archive (optionally restricted to a subpath) for SPDX headers,
+    manifest-declared licenses, canonical license files, and content licenses.
+
+    Args:
+        zip_path (str): Path to the zip file on disk.
+        subpath (str | None): Optional subdirectory inside the archive to
+            treat as the logical root. If None, the archive root is used.
+
+    Returns:
+        DetectionResult: A tuple of the detected SPDX expression (or None if
+        no license was found) and a metadata dictionary describing the
+        detection method and paths.
     """
     try:
         with zipfile.ZipFile(zip_path) as zipf:
@@ -385,8 +397,22 @@ def detect_license_in_zip(zip_path: str, subpath: Optional[str]) -> DetectionRes
 
 
 def detect_license_in_tree(root_dir: str | Path, subpath: Optional[str]) -> DetectionResult:
-    """
-    Detect license metadata in a local filesystem tree (root or subpath).
+    """Detect license metadata in a local filesystem tree.
+
+    Scans a directory tree (optionally restricted to a subpath) for SPDX
+    headers, manifest-declared licenses, canonical license files, and content
+    licenses.
+
+    Args:
+        root_dir (str | Path): Root directory of the repository or project
+            on the local filesystem.
+        subpath (str | None): Optional subdirectory under ``root_dir`` to
+            treat as the logical root. If None, ``root_dir`` is used.
+
+    Returns:
+        DetectionResult: A tuple of the detected SPDX expression (or None if
+        no license was found) and a metadata dictionary describing the
+        detection method and paths.
     """
     root = Path(root_dir).expanduser()
     if subpath:
@@ -943,8 +969,23 @@ def apply_license_to_context(
     license_id: str,
     meta: Optional[LicenseMeta],
 ) -> RepoContext:
-    """
-    Mutate or create a RepoContext so license metadata flows downstream.
+    """Attach detected license metadata to a repository context.
+
+    Updates an existing ``RepoContext`` in place (via ``object.__setattr__``)
+    or creates a new one so that license identifiers and related metadata
+    flow downstream through the pipeline.
+
+    Args:
+        context (RepoContext | None): Existing repository context to update,
+            or None to create a new context.
+        license_id (str): Resolved SPDX license identifier or expression.
+        meta (LicenseMeta | None): Optional metadata dictionary produced by
+            the detection routines, including paths, hashes, and content
+            license fields.
+
+    Returns:
+        RepoContext: The updated or newly created context carrying license
+        information.
     """
     extra_updates = {}
     if meta:

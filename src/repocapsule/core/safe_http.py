@@ -69,6 +69,7 @@ class SafeHttpResponse:
     _response: http.client.HTTPResponse
     _connection: http.client.HTTPConnection
     url: str
+    redirects: tuple[tuple[str, str, int], ...] = ()
 
     @property
     def status(self) -> int:
@@ -139,10 +140,10 @@ class SafeHttpClient:
         }
 
     # helpers
-    def _resolve_ips(self, hostname: str) -> list[str]:
+    def _resolve_ips(self, hostname: str, *, url: Optional[str] = None) -> list[str]:
         try:
             infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-        except socket.gaierror as exc:   
+        except socket.gaierror as exc:   # noqa: BLE001
             raise urllib.error.URLError(f"DNS resolution failed for {hostname}: {exc}") from exc
         ips: list[str] = []
         for family, _stype, _proto, _canon, sockaddr in infos:
@@ -155,7 +156,8 @@ class SafeHttpClient:
                 continue
             ips.append(ip)
         if not ips:
-            raise PrivateAddressBlocked(f"All resolved addresses for {hostname} are disallowed")
+            target = f" for {url}" if url else ""
+            raise PrivateAddressBlocked(f"All resolved addresses for {hostname} are disallowed{target}")
         return ips
 
     def _trusted_suffix_for(self, host: Optional[str]) -> Optional[str]:
@@ -246,6 +248,7 @@ class SafeHttpClient:
         *,
         data: Optional[bytes] = None,
         timeout: Optional[float] = None,
+        redirect_log: Optional[list[tuple[str, str, int]]] = None,
     ) -> SafeHttpResponse:
         req_obj = request
         if isinstance(request, str):
@@ -254,6 +257,7 @@ class SafeHttpClient:
         payload = req_obj.data if req_obj.data is not None else data
         headers = dict(req_obj.header_items())
         url = req_obj.full_url
+        redirect_log = redirect_log if redirect_log is not None else []
         return self._request(
             url=url,
             method=method,
@@ -263,6 +267,7 @@ class SafeHttpClient:
             redirects_remaining=self._max_redirects,
             origin_host=urllib.parse.urlsplit(url).hostname,
             redirects_followed=0,
+            redirect_log=redirect_log,
         )
 
     def open_with_retries(
@@ -275,6 +280,7 @@ class SafeHttpClient:
         backoff_base: float = 1.0,
         backoff_factor: float = 2.0,
         only_get_like: bool = True,
+        redirect_log: Optional[list[tuple[str, str, int]]] = None,
     ) -> SafeHttpResponse:
         """
         Retry wrapper around ``open`` with exponential backoff (GET-like methods only by default).
@@ -290,7 +296,7 @@ class SafeHttpClient:
         attempts = max(0, int(retries)) + 1
         for attempt in range(attempts):
             try:
-                return self.open(req_obj, data=data, timeout=timeout)
+                return self.open(req_obj, data=data, timeout=timeout, redirect_log=redirect_log)
             except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
                 last_error = exc
                 if attempt >= attempts - 1:
@@ -314,6 +320,7 @@ class SafeHttpClient:
         redirects_remaining: int,
         origin_host: Optional[str],
         redirects_followed: int,
+        redirect_log: Optional[list[tuple[str, str, int]]] = None,
     ) -> SafeHttpResponse:
         parsed = urllib.parse.urlsplit(url)
         scheme = (parsed.scheme or "http").lower()
@@ -324,7 +331,7 @@ class SafeHttpClient:
             raise urllib.error.URLError("URL missing host")
         port = parsed.port or (443 if scheme == "https" else 80)
         last_error: Optional[Exception] = None
-        for ip in self._resolve_ips(host):
+        for ip in self._resolve_ips(host, url=url):
             conn = self._build_connection(scheme=scheme, host=host, ip=ip, port=port, timeout=timeout)
             path = self._build_path(parsed)
             all_headers = self._normalize_headers(headers, host, port, scheme)
@@ -357,6 +364,8 @@ class SafeHttpClient:
                         f"Redirect blocked: cross-host redirect from {origin_host} to {new_host}"
                     )
                 new_method = "GET" if response.status in (301, 302, 303) else method
+                if redirect_log is not None:
+                    redirect_log.append((url, redirect_url, response.status))
                 return self._request(
                     url=redirect_url,
                     method=new_method,
@@ -366,6 +375,7 @@ class SafeHttpClient:
                     redirects_remaining=redirects_remaining - 1,
                     origin_host=origin_host,
                     redirects_followed=redirects_followed + 1,
+                    redirect_log=redirect_log,
                 )
             log.debug(
                 "HTTP %s %s status=%s redirects=%s",
@@ -374,7 +384,8 @@ class SafeHttpClient:
                 response.status,
                 redirects_followed,
             )
-            return SafeHttpResponse(response, conn, url=url)
+            redirects = tuple(redirect_log) if redirect_log else ()
+            return SafeHttpResponse(response, conn, url=url, redirects=redirects)
 
         raise urllib.error.URLError(f"All resolved addresses for {host} failed") from last_error
 

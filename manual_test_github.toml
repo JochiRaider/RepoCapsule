@@ -15,10 +15,14 @@
 [sources.github]
 # Cap bytes per file inside the GitHub archive (50 MiB, down from the 200 MiB default).
 per_file_cap = 52428800
-include_exts = [".rst",".md",".py"]
+# Note: GitHub defaults here are informational; per-spec defaults live under [sources.defaults.github_zip] below.
 
 # Other GitHubSourceConfig fields (max_total_uncompressed, max_members, etc.)
 # are left at their library defaults.
+
+# Apply an extension allowlist to all github_zip specs built by the manual script.
+[sources.defaults.github_zip]
+include_exts = [".rst",".md",".py"]
 
 # ---------------------------------------------------------------------------
 # Pipeline concurrency / behavior
@@ -26,7 +30,7 @@ include_exts = [".rst",".md",".py"]
 
 [pipeline]
 # Use threads for the main pipeline (suitable for mixed I/O and light CPU work).
-executor_kind = "thread"
+executor_kind = "auto"
 # max_workers = 0 → auto; submit_window = null → derived from max_workers.
 # We rely on those defaults here.
 

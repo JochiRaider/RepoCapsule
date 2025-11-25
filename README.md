@@ -1,13 +1,13 @@
 # RepoCapsule
 Library-first, config-driven pipeline that turns repositories, logs, and other text/structured sources into normalized JSONL and Parquet datasets for LLM fine-tuning and analysis.
 
-Define a pipeline once in Python or TOML (`RepocapsuleConfig`), run it via a small set of helpers (`convert_local_dir`, `convert_github`, `convert`), and get a stable record schema and dataset card fragments. Requires Python 3.11+.
+Define a pipeline once in Python or TOML (`RepocapsuleConfig`), run it via a small set of helpers (`convert_local_dir`, `convert_github`, `convert`), and get a stable record schema and dataset card fragments. Requires Python 3.11+. Specs are strictly declarative; all runtime objects (clients, sources/sinks, extractors/handlers, scorers) live in `PipelineRuntime` and are injected via registries or `PipelineOverrides`.
 
 ## Key features
 - **Sources (ingest):** Local directories, GitHub zipballs, web PDFs (page scrape or URL list), CSV/TSV, and SQLite tables/queries. Optional bytes handlers (PDF/EVTX/Parquet) activate when extras are installed. All are configured via `SourceConfig` and declarative `[[sources.specs]]` entries (see `core/config.py` and `example_config.toml`), and implemented under `src/repocapsule/sources`.
 - **Processing (decode → chunk → extract → records):** Safe decoding with Unicode normalization and mojibake repair (`core/decode.py`), document/code-aware chunking with token targets and overlap (`ChunkPolicy` in `core/chunk.py`), optional extractors (e.g., Markdown→KQL in `core/extras/md_kql.py`), and record-building in `core/convert.py` / `core/records.py`. Repo-level metadata flows via `RepoContext` and `RunMetadata`.
 - **Sinks (outputs):** JSONL (plain or gzipped) plus grouped prompt-text, and a Parquet dataset sink (via the `[parquet]` extra) implemented in `src/repocapsule/sinks`. Sinks are configured through `SinkConfig` and `[[sinks.specs]]` (e.g., `default_jsonl_prompt`, `parquet_dataset`) and can participate in run finalization.
-- **Quality control (optional):** Inline/advisory/post QC modes (`QCConfig` / `QCMode` in `core/config.py`) with heuristics, near-duplicate detection, CSV export, and customizable scorers (`QualityScorer` in `core/interfaces.py`, implemented in `core/extras/qc.py`). QC uses utilities from `core/qc_utils.py` and wiring in `core/qc_controller.py` and `cli/runner.py`.
+- **Quality control (optional):** Inline/advisory/post QC modes (`QCConfig` / `QCMode` in `core/config.py`) with heuristics, near-duplicate detection, CSV export, and customizable scorers (`QualityScorer` in `core/interfaces.py`, implemented in `core/extras/qc.py`). The default scorer is registered via `QualityScorerRegistry` under `DEFAULT_QC_SCORER_ID` (`jsonl_default`); QC uses utilities from `core/qc_utils.py` and wiring in `core/qc_controller.py` and `cli/runner.py`.
 - **Dataset cards:** Each run can emit Hugging Face–style dataset-card fragments (`*.card.json`) alongside the primary JSONL, then merge them into a final Markdown card using helpers in `dataset_card.py` controlled by `[dataset_card]` in the config.
 - **Extensibility:** Registries (`core/registries.py`) and entry-point plugins (`repocapsule.plugins` via `core/plugins.py`) allow new sources, sinks, bytes handlers, and QC scorers to be registered without modifying the core pipeline. New features should plug into the registries and builder, not bypass them.
 
@@ -63,13 +63,22 @@ stats = convert(cfg)
 ```
 `convert(...)` also accepts an already-built `PipelineEngine` if you need to reuse runtime wiring. In all cases the return value is a `dict` derived from `PipelineStats.as_dict()` (files/bytes/records, per-extension counts, QC summary).
 
+## CLI
+Installable entry point: `repocapsule` (also aliased as `repocapsule-qc`).
+
+- `repocapsule run -c config.toml [--override-max-workers N] [--override-executor-kind auto|thread|process] [--dry-run]` – load TOML/JSON config, optionally print the effective config (dry-run) or run and emit stats as JSON.
+- `repocapsule local ROOT_DIR OUT.jsonl [--prompt OUT.prompt] [--base-config CONFIG]` – quick local-dir conversion using optional base config overrides.
+- `repocapsule github URL OUT.jsonl [--prompt OUT.prompt] [--base-config CONFIG]` – GitHub wrapper that builds RepoContext from the URL.
+- `repocapsule card --fragments \"out/*.card.json\" --output README.md` – merge dataset-card fragments into a single README-style card.
+- `repocapsule qc INPUT.jsonl [--csv OUT.csv] [--parallel] [--config CONFIG]` – post-hoc QC scoring of an existing JSONL; requires QC extras.
+
 ## Concepts & architecture
 ### Configuration (`RepocapsuleConfig`)
 `RepocapsuleConfig` in `core/config.py` is the single source of truth for how a run is wired. Its major sections map directly to the TOML layout:
-- `sources`: defaults (`[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]`) plus declarative `[[sources.specs]]` entries (e.g., `local_dir`, `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`).
+- `sources`: defaults (`[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]`) plus per-kind defaults (`[sources.defaults.<kind>]` such as `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`, `local_dir`) and declarative `[[sources.specs]]` entries (e.g., `local_dir`, `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`).
 - `decode`: Unicode normalization, control stripping, mojibake repair, and optional per-file byte caps (`DecodeConfig`).
 - `chunk`: tokenizer selection (`tokenizer_name`), language metadata attachment, and the `ChunkPolicy` used for chunk sizes/overlap/semantic splitting.
-- `pipeline`: concurrency and processing behavior (`max_workers`, `submit_window`, `executor_kind`, `fail_fast`) plus optional extractors/file extractors/bytes handlers (wired via registries or Python, not TOML).
+- `pipeline`: concurrency and processing behavior (`max_workers`, `submit_window`, `executor_kind`, `fail_fast`). Runtime objects like extractors/file extractors/bytes handlers are injected via registries or `PipelineOverrides`, not embedded in declarative specs.
 - `sinks`: defaults for output location and compression plus `[[sinks.specs]]` entries that instantiate sinks and determine the primary JSONL and prompt paths.
 - `http`: settings used to build a `SafeHttpClient` shared across remote-capable sources.
 - `qc`: `QCConfig` and `QCHeuristics` for scoring, dedup, mode selection, and post-QC overrides.
@@ -117,6 +126,29 @@ Records are plain dicts with a `"text"` field and a `"meta"` mapping built by `b
 - `build_pipeline_plan(config)` (in `core/builder.py`) validates config, loads plugins, builds sources/sinks/bytes handlers/QC hooks, attaches run-header records, resolves HTTP/QC/executor wiring, and returns an immutable `PipelinePlan`.
 - `PipelineEngine` (in `core/pipeline.py`) iterates sources, decodes and chunks files, applies optional file/record middleware (including inline QC), dispatches to sinks, and collects `PipelineStats` (files/bytes/records/by_ext/QC summary).
 - High-level entry points: `convert(config_or_engine)` and convenience wrappers `convert_local_dir` / `convert_github` (in `cli/runner.py`) build profiles and run the engine. These are thin orchestration layers; new functionality should plug into the builder/registries rather than creating ad-hoc pipelines.
+- Middleware contract: record middlewares implement `process(record) -> Optional[Record]`, file middlewares implement `process(item, records) -> Optional[Iterable[Record]]`; plain callables are auto-wrapped to match this shape.
+
+### Runtime overrides (advanced)
+Declarative configs stay “pure data”: `_assert_runtime_free_spec` rejects baked-in runtime objects like HTTP clients, sources/sinks, extractors/handlers, or scorers. Programmatic callers can supply those via `PipelineOverrides` instead; the builder stashes them on `PipelineRuntime` while keeping the spec immutable:
+```python
+from repocapsule import PipelineOverrides, convert
+
+overrides = PipelineOverrides(
+    http_client=my_safe_client,
+    qc_scorer=my_quality_scorer,
+    file_extractor=my_extractor,
+    bytes_handlers=(my_sniff, my_handler),
+)
+stats = convert(cfg, overrides=overrides)
+# stats -> {'files': 1, 'records': 1, 'qc': {'enabled': True, 'mode': 'inline', 'scored': 1, 'kept': 1, ...}, ...}
+```
+Each override is optional; when provided, it bypasses registry-based wiring for that component while leaving the TOML/`RepocapsuleConfig` spec unchanged.
+
+For plan-based helpers that need runtime wiring (bytes handlers, extractors), use the plan-aware API:
+```python
+from repocapsule import iter_records_from_bytes_with_plan
+records = list(iter_records_from_bytes_with_plan(data, rel_path="foo.bin", plan=plan, context=ctx))
+```
 
 ### Concurrency
 - `pipeline.executor_kind`: `"thread"`, `"process"`, or `"auto"` (default). `pipeline.max_workers` / `submit_window` tune pool size and submission window.
@@ -136,7 +168,7 @@ Records are plain dicts with a `"text"` field and a `"meta"` mapping built by `b
 - `QCConfig` (`core/config.py`) controls whether QC is enabled, the mode (`inline`, `advisory`, `post`, `off` via `QCMode`), score thresholds (`min_score`), near-duplicate handling (`drop_near_dups`), error behavior (`fail_on_error`), CSV emission (`write_csv`, `csv_suffix`), and post-QC concurrency overrides (`parallel_post`, `post_executor_kind`, `post_max_workers`, `post_submit_window`). `QCHeuristics` tunes target token bands, repetition window, code weights, and simhash/minhash knobs.
 - **Inline/advisory:** For `mode="inline"` or `"advisory"`, `build_pipeline_plan` wires an `InlineQCController` (`core/qc_controller.py`) into the pipeline. It wraps a `QualityScorer` (typically `JSONLQualityScorer` from `core/extras/qc.py` when `[qc]` extras are installed), updates `QCSummaryTracker` in `PipelineStats`, attaches QC metadata to each record’s `meta`, and optionally drops records that fail QC gates (inline only).
 - **Post-QC:** For `mode="post"`, `cli/runner.run_engine` can rescore the primary JSONL after extraction, using either an existing scorer (`QCConfig.scorer`) or one built via `make_qc_scorer`. It supports sequential or process-based scoring (`qc.parallel_post`), merges QC summaries into run summaries, and optionally writes a QC CSV ({primary_jsonl}_quality.csv).
-- **CLI:** `pyproject.toml` declares a `repocapsule-qc` entry point, but there is no dedicated CLI module in this repository; use the programmatic API (`JSONLQualityScorer`, `score_jsonl_to_csv`, `QCConfig`) for now.
+- **CLI:** The `repocapsule` entry point exposes `run/local/github/card/qc` commands; `repocapsule qc` is a thin wrapper around the same QC scorer APIs (`JSONLQualityScorer`, `score_jsonl_to_csv`, `QCConfig`) and requires QC extras.
 
 Rules of thumb for QC contributions:
 - Implement new scorers by conforming to `QualityScorer` and, if you want them discoverable via config/registries, by adding a `QualityScorerFactory` and registering it with `quality_scorer_registry` (see `core/extras/qc.py`).
@@ -311,6 +343,7 @@ Goal: “I want to change how quality scores are computed, what gets dropped, or
 3. Wrap new scorers in a `QualityScorerFactory` and register with `quality_scorer_registry` (`core/registries.py` / `core/factories.py`).
 4. For inline/advisory QC, see `InlineQCController` and `QCSummaryTracker` in `core/qc_controller.py`.
 5. For post-QC, see `qc.py` and how `run_engine` uses `QCConfig` to drive post-processing.
+   - Pick a scorer via `qc.scorer_id` (None = registry default) and pass scorer-specific settings via `qc.scorer_options` (a free-form mapping). The built-in heuristics scorer reads overrides from `qc.scorer_options.heuristics`.
 
 Rule of thumb: **New QC logic should be expressed as scorers + heuristics, not baked into sources or sinks.**
 
@@ -517,4 +550,3 @@ Use this when:
 - Token counts fall back to heuristic estimates when `tiktoken` is absent.
 - Executor selection is heuristic; extremely large PDFs/EVTX workloads may need manual tuning of `pipeline.executor_kind`/`max_workers`.
 - Future work: richer source types, additional sinks/handlers, stronger QC CLI, and expanded dataset card automation.
-

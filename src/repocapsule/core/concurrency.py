@@ -70,6 +70,7 @@ class Executor:
         *,
         fail_fast: bool = False,
         on_error: Callable[[BaseException], None] | None = None,
+        on_submit_error: Callable[[T, BaseException], None] | None = None,
     ) -> None:
         """
         Submit items to workers and stream results as they complete.
@@ -100,8 +101,15 @@ class Executor:
                     on_result(result)
 
             for item in items:
-                fut = pool.submit(fn, item)
-                pending.append(fut)
+                try:
+                    fut = pool.submit(fn, item)
+                    pending.append(fut)
+                except Exception as exc:  # noqa: BLE001
+                    if on_submit_error:
+                        on_submit_error(item, exc)
+                    if fail_fast:
+                        raise
+                    continue
                 if len(pending) >= window:
                     _drain(block=True)
 
@@ -123,6 +131,9 @@ def process_items_parallel(
     initializer: Callable[..., Any] | None = None,
     initargs: tuple[Any, ...] = (),
 ) -> None:
+    """
+    Specialized adapter over Executor.map_unordered for file/record processing.
+    """
     if max_workers < 1:
         raise ValueError("process_items_parallel requires max_workers >= 1")
     normalized_kind = (executor_kind or "thread").strip().lower()
@@ -139,53 +150,35 @@ def process_items_parallel(
         initargs=initargs if normalized_kind == "process" else (),
     )
 
-    with executor._make_executor() as pool_exec:
-        pending: list[Future[Tuple[Any, Iterable[Any]]]] = []
+    def _worker(item: T) -> Tuple[Any, Iterable[Any]]:
+        return process_one(item)
 
-        def _submit_work(item: T) -> None:
-            try:
-                pending.append(pool_exec.submit(process_one, item))
-            except Exception as exc:  # noqa: BLE001
-                if on_submit_error:
-                    on_submit_error(item, exc)
-                if fail_fast:
-                    raise
+    def _on_result(result: Tuple[Any, Iterable[Any]]) -> None:
+        item, recs = result
+        write_records(item, recs)
 
-        def _drain(block: bool = False) -> None:
-            nonlocal pending
-            if not pending:
-                return
-            done, still = wait(
-                pending,
-                timeout=None if block else 0.0,
-                return_when=FIRST_COMPLETED,
-            )
-            pending = list(still)
-            for fut in done:
-                try:
-                    item, recs = fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    if on_worker_error:
-                        on_worker_error(exc)
-                    if fail_fast:
-                        raise
-                    continue
-                write_records(item, recs)
+    def _on_error(exc: BaseException) -> None:
+        if on_worker_error:
+            on_worker_error(exc)
 
-        for work in items:
-            _submit_work(work)
-            if len(pending) >= cfg.window:
-                _drain(block=True)
-        while pending:
-            _drain(block=True)
+    executor.map_unordered(
+        items,
+        _worker,
+        _on_result,
+        fail_fast=fail_fast,
+        on_error=_on_error,
+        on_submit_error=on_submit_error,
+    )
 
 
-def _has_heavy_binary_handlers(cfg: RepocapsuleConfig) -> bool:
+def _has_heavy_binary_handlers(cfg: RepocapsuleConfig, runtime: Any | None = None) -> bool:
     """Return True if the pipeline is configured with PDF/EVTX handlers."""
     try:
         handlers = cfg.pipeline.bytes_handlers
     except Exception:
-        return False
+        handlers = ()
+    if runtime is not None:
+        handlers = getattr(runtime, "bytes_handlers", None) or handlers
 
     for _sniff, handler in handlers:
         name = getattr(handler, "__name__", "").lower()
@@ -197,22 +190,33 @@ def _has_heavy_binary_handlers(cfg: RepocapsuleConfig) -> bool:
     return False
 
 
-def _has_heavy_sources(cfg: RepocapsuleConfig) -> bool:
+def _has_heavy_sources(cfg: RepocapsuleConfig, runtime: Any | None = None) -> bool:
     """
     Heuristic: consider the workload heavy when configured sources strongly suggest PDF/EVTX ingestion.
     """
     try:
         src_cfg = cfg.sources
     except Exception:
-        return False
+        src_cfg = None
 
-    try:
-        for src in src_cfg.sources:
-            cls_name = type(src).__name__.lower()
+    runtime_sources = getattr(runtime, "sources", None)
+    if runtime_sources:
+        for src in runtime_sources:
+            try:
+                cls_name = type(src).__name__.lower()
+            except Exception:
+                continue
             if "pdf" in cls_name or "evtx" in cls_name:
                 return True
-    except Exception:
-        pass
+
+    if src_cfg:
+        try:
+            for src in getattr(src_cfg, "sources", ()):
+                cls_name = type(src).__name__.lower()
+                if "pdf" in cls_name or "evtx" in cls_name:
+                    return True
+        except Exception:
+            pass
 
     local_cfg = getattr(src_cfg, "local", None)
     if local_cfg and getattr(local_cfg, "include_exts", None):
@@ -294,8 +298,8 @@ def _infer_executor_kind(cfg: RepocapsuleConfig, runtime: Any | None = None) -> 
     hinted = _preferred_executor_from_hints(runtime)
     if hinted in {"thread", "process"}:
         return hinted
-    heavy_handlers = _has_heavy_binary_handlers(cfg)
-    heavy_sources = _has_heavy_sources(cfg)
+    heavy_handlers = _has_heavy_binary_handlers(cfg, runtime)
+    heavy_sources = _has_heavy_sources(cfg, runtime)
     if heavy_handlers and heavy_sources:
         return "process"
     return "thread"
@@ -329,7 +333,7 @@ def resolve_pipeline_executor_config(cfg: RepocapsuleConfig, runtime: Any | None
     return exec_cfg, fail_fast
 
 
-def resolve_qc_executor_config(cfg: RepocapsuleConfig) -> ExecutorConfig:
+def resolve_qc_executor_config(cfg: RepocapsuleConfig, runtime: Any | None = None) -> ExecutorConfig:
     qc = cfg.qc
     pc = cfg.pipeline
     pipeline_max_workers = pc.max_workers or (os.cpu_count() or 1)
@@ -346,7 +350,7 @@ def resolve_qc_executor_config(cfg: RepocapsuleConfig) -> ExecutorConfig:
 
     raw_kind = (qc.post_executor_kind or pc.executor_kind or "thread").strip().lower()
     if raw_kind == "auto":
-        kind = _infer_executor_kind(cfg)
+        kind = _infer_executor_kind(cfg, runtime=runtime)
     else:
         kind = raw_kind
     if kind not in {"thread", "process"}:

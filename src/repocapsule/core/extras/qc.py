@@ -9,11 +9,11 @@ import json
 import os
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Mapping
 
 from ..log import get_logger
-from ..config import QCConfig
 from ..records import is_summary_record
+from ..config import QCHeuristics, DEFAULT_QC_SCORER_ID
 from ..qc_utils import (
     TEXTY_LC,
     MinHashLSH,
@@ -110,6 +110,22 @@ class JSONLQualityScorer:
         gopher_weight: float = 0.10,
         heuristics: object | None = None,
     ):
+        self._init_kwargs = {
+            "lm_model_id": lm_model_id,
+            "device": device,
+            "dtype": dtype,
+            "simhash_hamm_thresh": simhash_hamm_thresh,
+            "simhash_window": simhash_window,
+            "local_files_only": local_files_only,
+            "enable_minhash": enable_minhash,
+            "minhash_perms": minhash_perms,
+            "minhash_bands": minhash_bands,
+            "minhash_shingle_k": minhash_shingle_k,
+            "minhash_jaccard_thresh": minhash_jaccard_thresh,
+            "enable_gopher": enable_gopher,
+            "gopher_weight": gopher_weight,
+            "heuristics": heuristics,
+        }
         self.last_stats: JSONLScoreStats | None = None
         # Heuristic overrides: constructor args override heuristics; heuristics override baked-in defaults.
         if heuristics is not None:
@@ -154,9 +170,28 @@ class JSONLQualityScorer:
         self.gopher_weight = float(gopher_weight)
         self.sim_seen: deque[tuple[int, str]] = deque(maxlen=int(simhash_window))
         self.heuristics = heuristics
+        self._init_kwargs.update(
+            simhash_hamm_thresh=self.sim_thresh,
+            simhash_window=self.sim_seen.maxlen or simhash_window,
+            enable_minhash=self.enable_minhash,
+            minhash_perms=minhash_perms,
+            minhash_bands=minhash_bands,
+            minhash_shingle_k=self.minhash_k,
+            minhash_jaccard_thresh=minhash_jaccard_thresh,
+        )
+        self.last_stats = None
 
     def reset_stats(self) -> None:
         self.last_stats = JSONLScoreStats()
+
+    def clone_for_parallel(self) -> "JSONLQualityScorer":
+        """
+        Return a fresh scorer instance with identical configuration but independent state.
+        """
+        kwargs = dict(getattr(self, "_init_kwargs", {}) or {})
+        if not kwargs:
+            kwargs = {"heuristics": getattr(self, "heuristics", None)}
+        return JSONLQualityScorer(**kwargs)
 
     def score_record(self, rec: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -410,10 +445,17 @@ def score_jsonl_to_csv(
 
 
 class DefaultQualityScorerFactory:
-    id = "jsonl_default"
+    id = DEFAULT_QC_SCORER_ID
 
-    def build(self, cfg: QCConfig) -> "JSONLQualityScorer":
-        return JSONLQualityScorer(heuristics=getattr(cfg, "heuristics", None))
+    def build(self, options: Mapping[str, Any]) -> "JSONLQualityScorer":
+        heur_opt = options.get("heuristics")
+        if isinstance(heur_opt, QCHeuristics):
+            heuristics = heur_opt
+        elif isinstance(heur_opt, Mapping):
+            heuristics = QCHeuristics(**dict(heur_opt))
+        else:
+            heuristics = None
+        return JSONLQualityScorer(heuristics=heuristics)
 
 
 try:

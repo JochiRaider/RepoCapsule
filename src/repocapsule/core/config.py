@@ -68,6 +68,9 @@ class QCMode:
         return mode == cls.ADVISORY
 
 
+DEFAULT_QC_SCORER_ID = "jsonl_default"
+
+
 # ---------------------------------------------------------------------------
 # Source configs
 # ---------------------------------------------------------------------------
@@ -140,6 +143,8 @@ class SourceConfig:
     pdf: PdfSourceConfig = field(default_factory=PdfSourceConfig)
     csv: CsvSourceConfig = field(default_factory=CsvSourceConfig)
     sqlite: SQLiteSourceConfig = field(default_factory=SQLiteSourceConfig)
+    # Generic per-kind defaults, keyed by SourceSpec.kind or a plugin-defined id.
+    defaults: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +225,8 @@ class SinkConfig:
     prompt: PromptConfig = field(default_factory=PromptConfig)
     compress_jsonl: bool = False
     jsonl_basename: str = "data"
+    # Generic per-kind defaults for sinks, keyed by SinkSpec.kind.
+    defaults: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -338,21 +345,21 @@ class QCConfig:
 
     Semantics:
     - enabled=False → QC is off regardless of mode.
-    - enabled=True with mode in {"inline", "advisory"} → requires a scorer and QC extras; validated at config prep.
+    - enabled=True with mode in {"inline", "advisory"} → requires either a resolved scorer (qc.scorer) or a scorer id (qc.scorer_id) at config time; the builder resolves scorer_id later and fails if QC extras are missing.
     - enabled=True with mode="post" → scorer optional; if QC extras are missing, QC is skipped with a warning.
+    - default scorer id is ``DEFAULT_QC_SCORER_ID`` (currently "jsonl_default"), provided by the default QC plugin.
     Concurrency:
     - ``parallel_post`` enables post-QC scoring via process_items_parallel.
     - ``post_*`` knobs override pipeline concurrency for post-QC; when None, they inherit from PipelineConfig.
 
-    heuristics:
-    Advanced tuning of QC heuristics (length bands, repetition window, code complexity weights). Most
-    users can ignore this unless they need to align scoring with specialized corpora.
     """
 
     enabled: bool = False
     write_csv: bool = False
     csv_suffix: str = "_quality.csv"
     scorer: Optional[Any] = None  # optional extra
+    scorer_id: Optional[str] = None  # None → registry default (first registered scorer)
+    scorer_options: Dict[str, Any] = field(default_factory=dict)
     fail_on_error: bool = False
     min_score: Optional[float] = 60.0
     drop_near_dups: bool = False
@@ -361,7 +368,6 @@ class QCConfig:
     post_executor_kind: Optional[str] = None
     post_max_workers: Optional[int] = None
     post_submit_window: Optional[int] = None
-    heuristics: "QCHeuristics" = field(default_factory=QCHeuristics)
 
     def normalize_mode(self) -> str:
         normalized = QCMode.normalize(self.mode)
@@ -372,39 +378,52 @@ class QCConfig:
         mode = self.normalize_mode()
         if self.enabled and mode == QCMode.OFF:
             raise ValueError("QC enabled but mode is 'off'; disable qc.enabled or choose an active mode.")
-        if self.enabled and mode in {QCMode.INLINE, QCMode.ADVISORY} and self.scorer is None:
-            raise ValueError("Inline/advisory QC requires a scorer; set qc.scorer or install QC extras.")
-        h = self.heuristics or QCHeuristics()
-        if not isinstance(h, QCHeuristics):
-            try:
-                h = QCHeuristics(**dict(h))  # type: ignore[arg-type]
-            except Exception as exc:
-                raise TypeError(f"qc.heuristics must be QCHeuristics-compatible; got {type(self.heuristics).__name__}") from exc
-        self.heuristics = h
-        numeric_positive = [
-            ("target_code_min", h.target_code_min),
-            ("target_code_max", h.target_code_max),
-            ("target_log_min", h.target_log_min),
-            ("target_log_max", h.target_log_max),
-            ("target_text_min", h.target_text_min),
-            ("target_text_max", h.target_text_max),
-            ("target_other_min", h.target_other_min),
-            ("target_other_max", h.target_other_max),
-            ("repetition_k", h.repetition_k),
-            ("code_short_line_threshold", h.code_short_line_threshold),
-        ]
-        for name, value in numeric_positive:
-            if value <= 0:
-                raise ValueError(f"qc.heuristics.{name} must be positive; got {value}")
-        weight_fields = [
-            ("code_punct_weight", h.code_punct_weight),
-            ("code_short_line_weight", h.code_short_line_weight),
-        ]
-        for name, value in weight_fields:
-            if not (0.0 <= value <= 1.0):
-                raise ValueError(f"qc.heuristics.{name} must be between 0 and 1; got {value}")
-        if h.simhash_window is not None and h.simhash_window <= 0:
-            raise ValueError(f"qc.heuristics.simhash_window must be positive; got {h.simhash_window}")
+        needs_scorer = self.enabled and mode in {QCMode.INLINE, QCMode.ADVISORY}
+        has_resolved_scorer = self.scorer is not None
+        has_planned_scorer = bool(self.scorer_id)
+
+        if needs_scorer and not (has_resolved_scorer or has_planned_scorer):
+            raise ValueError("Inline/advisory QC requires a scorer; set qc.scorer_id or install QC extras.")
+        if self.scorer_options is None or not isinstance(self.scorer_options, dict):
+            raise TypeError("qc.scorer_options must be a mapping (use {} for defaults).")
+        using_default = self.scorer_id is None or self.scorer_id == DEFAULT_QC_SCORER_ID
+        heur_opt = self.scorer_options.get("heuristics")
+        if heur_opt is not None and using_default:
+            h = heur_opt
+            if not isinstance(h, QCHeuristics):
+                try:
+                    h = QCHeuristics(**dict(h))  # type: ignore[arg-type]
+                except Exception as exc:
+                    raise TypeError(
+                        f"qc.scorer_options.heuristics must be QCHeuristics-compatible; got {type(heur_opt).__name__}"
+                    ) from exc
+            numeric_positive = [
+                ("target_code_min", h.target_code_min),
+                ("target_code_max", h.target_code_max),
+                ("target_log_min", h.target_log_min),
+                ("target_log_max", h.target_log_max),
+                ("target_text_min", h.target_text_min),
+                ("target_text_max", h.target_text_max),
+                ("target_other_min", h.target_other_min),
+                ("target_other_max", h.target_other_max),
+                ("repetition_k", h.repetition_k),
+                ("code_short_line_threshold", h.code_short_line_threshold),
+                ("simhash_window", h.simhash_window),
+            ]
+            for name, value in numeric_positive:
+                if value is None:
+                    continue
+                if value <= 0:
+                    raise ValueError(f"qc.scorer_options.heuristics.{name} must be positive; got {value!r}.")
+            weight_fields = [
+                ("code_punct_weight", h.code_punct_weight),
+                ("code_short_line_weight", h.code_short_line_weight),
+            ]
+            for name, value in weight_fields:
+                if value is None:
+                    continue
+                if not (0.0 <= value <= 1.0):
+                    raise ValueError(f"qc.scorer_options.heuristics.{name} must be between 0 and 1; got {value!r}.")
 
 
 @dataclass(slots=True)
@@ -491,6 +510,17 @@ class RunMetadata:
 
 @dataclass(slots=True)
 class RepocapsuleConfig:
+    """
+    Declarative spec for a Repocapsule run.
+
+    This object must remain purely declarative/serializable: it can hold only
+    configuration knobs and derived scalar/string/path values. Anything that is
+    callable, holds open resources, or maintains runtime state (HTTP clients,
+    Source/Sink instances, file extractors, bytes handlers, QC scorers, plugins,
+    executors, etc.) must live in PipelineRuntime or other ephemeral wiring,
+    never on this spec. Derived declarative fields such as normalized modes,
+    resolved primary JSONL names, or output directories are allowed.
+    """
     sources: SourceConfig = field(default_factory=SourceConfig)
     decode: DecodeConfig = field(default_factory=DecodeConfig)
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
@@ -515,23 +545,9 @@ class RepocapsuleConfig:
     def with_context(self, ctx: RepoContext) -> RepocapsuleConfig:
         return replace(self, sinks=replace(self.sinks, context=ctx))
 
-    def prepared(self, *, mutate: bool = False) -> "RepocapsuleConfig":
-        """
-        Deprecated: use ``build_pipeline_plan`` instead. Returns the prepared config for compatibility.
-        """
-        import warnings
-        from .builder import build_pipeline_plan
-
-        warnings.warn(
-            "RepocapsuleConfig.prepared is deprecated; use build_pipeline_plan instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        plan = build_pipeline_plan(self, mutate=mutate)
-        return plan.config
-
     def validate(self) -> None:
         self._validate_paths()
+        # QC validation is structural here (scorer object or scorer_id present); builder still resolves scorer_id.
         self.qc.validate()
         allowed = {"thread", "process", "auto"}
         kind = (self.pipeline.executor_kind or "auto").strip().lower()
@@ -729,4 +745,4 @@ def is_dataclass_type(typ: Any) -> bool:
 
 
 
-__all__ = ["RepocapsuleConfig", "RunMetadata", "FileProcessingConfig"]
+__all__ = ["RepocapsuleConfig", "RunMetadata", "FileProcessingConfig", "DEFAULT_QC_SCORER_ID"]

@@ -41,6 +41,7 @@ class _LimitedStream(io.BufferedReader):
 __all__ = [
     "list_records_for_file",
     "list_records_from_bytes",
+    "iter_records_from_bytes_with_plan",
     "build_records_from_bytes",
     "ByteSource",
     "RecordBuilderContext",
@@ -295,6 +296,34 @@ def iter_records_from_bytes(
         source_url=source_url,
         source_domain=derived_domain,
         file_size=file_size,
+    )
+
+
+def iter_records_from_bytes_with_plan(
+    data: bytes,
+    rel_path: str,
+    *,
+    plan: Any,
+    context: Optional[RepoContext] = None,
+    file_size: int | None = None,
+    source_url: Optional[str] = None,
+    source_domain: Optional[str] = None,
+) -> Iterator[Dict[str, object]]:
+    """
+    Version of iter_records_from_bytes that injects runtime handlers from a PipelinePlan.
+    """
+    cfg = plan.spec
+    runtime = plan.runtime
+    pipeline_cfg = replace(cfg.pipeline, bytes_handlers=runtime.bytes_handlers)
+    fp_cfg = FileProcessingConfig(decode=cfg.decode, chunk=cfg.chunk, pipeline=pipeline_cfg)
+    return iter_records_from_bytes(
+        data,
+        rel_path,
+        config=fp_cfg,
+        context=context,
+        file_size=file_size,
+        source_url=source_url,
+        source_domain=source_domain,
     )
 
 

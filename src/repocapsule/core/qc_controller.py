@@ -1,7 +1,8 @@
+# qc_controller.py
+# SPDX-License-Identifier: MIT
 """
 Helpers for inline QC execution and summary building.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -173,10 +174,6 @@ class InlineQCController:
         keep = self.summary.observe(qc_result, apply_gates=self.enforce_drops)
         self._merge_qc_meta(record, qc_result)
         return keep
-
-    def should_keep(self, record: Record) -> bool:
-        # Backward compatibility alias for legacy call sites.
-        return self.accept(record)
 
     def on_record(self, record: Record) -> Record:
         # Inline QC performs all work inside accept(); observer hook is a pass-through.

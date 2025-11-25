@@ -9,12 +9,13 @@ description = "Repository → JSONL converter with robust decoding, structure-aw
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-  { name = "Your Name", email = "you@example.com" },
+  { name = "Repocapsule Maintainers" },
 ]
 license = { text = "MIT" }
 keywords = ["jsonl", "github", "markdown", "kql", "ingestion", "chunking", "pdf", "evtx", "parquet"]
 
 classifiers = [
+  "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
@@ -47,12 +48,13 @@ qc = [
 parquet = ["pyarrow>=15"]
 
 [project.urls]
-Homepage = "https://github.com/your-org/repocapsule"
-Repository = "https://github.com/your-org/repocapsule"
-Issues = "https://github.com/your-org/repocapsule/issues"
+Homepage = "https://github.com/jochiraider/repocapsule"
+Repository = "https://github.com/jochiraider/repocapsule"
+Issues = "https://github.com/jochiraider/repocapsule/issues"
 
 [project.scripts]
-repocapsule-qc = "repocapsule.qc:main"
+repocapsule = "repocapsule.cli.main:main"
+repocapsule-qc = "repocapsule.cli.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

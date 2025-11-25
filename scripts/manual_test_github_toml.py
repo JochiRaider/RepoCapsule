@@ -22,6 +22,7 @@ from __future__ import annotations
 # Allow running from a source checkout without installing the package.
 import sys
 import pathlib
+from dataclasses import replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
@@ -29,13 +30,15 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from repocapsule import RepocapsuleConfig, convert, load_config_from_path
+from repocapsule.core.config import DEFAULT_QC_SCORER_ID
 from repocapsule.cli.runner import default_paths_for_github, make_github_profile
-from repocapsule.core.builder import build_pipeline_plan
+from repocapsule.core.builder import PipelineOverrides, build_pipeline_plan
 from repocapsule.core.chunk import ChunkPolicy
 from repocapsule.core.interfaces import RepoContext
 from repocapsule.core.log import configure_logging
 from repocapsule.core.pipeline import PipelineEngine
 from repocapsule.core.registries import quality_scorer_registry
+from repocapsule.core.convert import DefaultExtractor
 
 # Optional extractor for KQL blocks inside Markdown
 try:
@@ -58,8 +61,8 @@ except Exception:
 
 # Example GitHub repo to test:
 # URL = "https://github.com/pallets/flask/tree/main/docs"
-# URL = "https://github.com/JochiRaider/URL_Research_Tool"
-URL = "https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules"
+URL = "https://github.com/JochiRaider/URL_Research_Tool"
+# URL = "https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules"
 # URL = "https://github.com/chinapandaman/PyPDFForm"
 # URL = "https://github.com/SystemsApproach/book"
 REF: Optional[str] = None  # e.g. "main", "v1.0.0", or a commit SHA (only used for naming if spec.ref is None)
@@ -72,7 +75,7 @@ OUT_DIR = REPO_ROOT / "out"
 CONFIG_PATH = REPO_ROOT / "manual_test_github.toml"
 
 # Markdown → KQL extraction (via Extractor; this just toggles whether we add it)
-ENABLE_KQL_MD_EXTRACTOR = True
+ENABLE_KQL_MD_EXTRACTOR = False
 
 # Chunking policy: tweak as needed (not expressed in TOML yet)
 POLICY = ChunkPolicy(mode="doc")  # , target_tokens=1700, overlap_tokens=40, min_tokens=400
@@ -111,7 +114,6 @@ def _plan_output_paths(
 
 def _build_config(
     base_cfg: RepocapsuleConfig,
-    extractors: Sequence[object],
 ) -> RepocapsuleConfig:
     """
     Take a TOML-loaded RepocapsuleConfig and apply runtime-only tweaks.
@@ -119,14 +121,12 @@ def _build_config(
     The TOML file controls stable, serializable knobs (QC, concurrency, HTTP, etc.).
     This helper stitches in objects that are hard to express in TOML, such as:
     - the ChunkPolicy instance
-    - any custom Extractors (e.g., KqlFromMarkdownExtractor)
     QC scorers are now registered via the registry system to keep the config runtime-free.
     """
     cfg = base_cfg
 
     # Runtime-only wiring that isn't TOML-friendly.
     cfg.chunk.policy = POLICY
-    cfg.pipeline.extractors = tuple(extractors)
     cfg.qc.scorer = None
     return cfg
 
@@ -181,6 +181,24 @@ def _register_qc_factory(cfg: RepocapsuleConfig, log) -> None:
     quality_scorer_registry.register(ManualQualityScorerFactory())
 
 
+class _RuntimeExtractor(DefaultExtractor):
+    """
+    FileExtractor that injects runtime-only Extractors without mutating the spec.
+    """
+
+    def __init__(self, extractors: Sequence[object]):
+        super().__init__()
+        self._runtime_extractors = tuple(extractors)
+
+    def extract(self, item, *, config, context=None):
+        try:
+            pipeline_cfg = replace(config.pipeline, extractors=self._runtime_extractors)
+            cfg = replace(config, pipeline=pipeline_cfg)
+        except Exception:
+            cfg = config
+        return super().extract(item, config=cfg, context=context)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main
 # ──────────────────────────────────────────────────────────────────────────────
@@ -203,9 +221,11 @@ def main() -> None:
         extractors.append(KqlFromMarkdownExtractor())
 
     # Apply runtime-only wiring on top of the TOML-based config.
-    run_cfg = _build_config(base_cfg, extractors)
+    run_cfg = _build_config(base_cfg)
     _maybe_disable_qc(run_cfg, log)
     _register_qc_factory(run_cfg, log)
+    if getattr(run_cfg.qc, "enabled", False) and not getattr(run_cfg.qc, "scorer_id", None):
+        run_cfg.qc.scorer_id = DEFAULT_QC_SCORER_ID
 
     qc_enabled = bool(getattr(run_cfg.qc, "enabled", False))
     qc_mode = getattr(run_cfg.qc, "mode", "off")
@@ -232,7 +252,11 @@ def main() -> None:
         base_config=run_cfg,
         repo_context=ctx,
     )
-    plan = build_pipeline_plan(profile_cfg, scorer_registry=quality_scorer_registry)
+    overrides = None
+    if extractors:
+        overrides = PipelineOverrides(file_extractor=_RuntimeExtractor(extractors))
+
+    plan = build_pipeline_plan(profile_cfg, scorer_registry=quality_scorer_registry, overrides=overrides)
     engine = PipelineEngine(plan)
     stats = convert(engine)
 

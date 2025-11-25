@@ -9,30 +9,47 @@ or a TOML/JSON file, invoke a runner such as :func:`convert_local_dir`
 /:func:`convert_github` or :func:`convert`, and consume records via the
 provided sinks.
 
-Examples
---------
+High-level entry points such as :func:`convert`, :func:`convert_local_dir`,
+and :func:`convert_github` are thin orchestration layers. They build
+profiles, construct a :class:`PipelineEngine`, and run it; new
+functionality should generally plug into the builder, registries, and
+factories used by the engine rather than creating ad-hoc pipelines in
+these helpers.
+
+Quality control (inline or post-hoc) is configured via :class:`QCConfig`.
+When `mode="post"`, :func:`run_engine` (from
+:mod:`repocapsule.cli.runner`) can rescore the primary JSONL after
+extraction, optionally using process-based parallel scoring and emitting
+QC CSV diagnostics.
+
+## Examples
+
 Minimal local directory run::
 
-    >>> from repocapsule import convert_local_dir
-    >>> stats = convert_local_dir(
-    ...     root_dir="path/to/repo",
-    ...     out_jsonl="out/repo.jsonl",
-    ... )
+```
+>>> from repocapsule import convert_local_dir
+>>> stats = convert_local_dir(
+...     root_dir="path/to/repo",
+...     out_jsonl="out/repo.jsonl",
+... )
+```
 
 Config-driven run::
 
-    >>> from repocapsule import load_config_from_path, convert
-    >>> cfg = load_config_from_path("example_config.toml")
-    >>> stats = convert(cfg)
+```
+>>> from repocapsule import load_config_from_path, convert
+>>> cfg = load_config_from_path("example_config.toml")
+>>> stats = convert(cfg)
+```
 
 Advanced utilities are imported here for convenience, but anything not in
-``PRIMARY_API`` is considered an expert surface and may change between
+`PRIMARY_API` is considered an expert surface and may change between
 releases.
 
 For HTTP access (GitHub zipballs, web PDFs), prefer configuring
-``cfg.http``; the builder/factories will construct a :class:`SafeHttpClient`
+`cfg.http`; the builder/factories will construct a :class:`SafeHttpClient`
 and reuse it for remote sources. The module-level client in
-``core.safe_http`` is intended primarily for simple one-shot scripts and
+`core.safe_http` is intended primarily for simple one-shot scripts and
 the CLI, not long-lived applications.
 """
 
@@ -70,6 +87,7 @@ from .cli.runner import (
     make_local_repo_config,
     make_github_repo_config,
 )
+from .core.builder import PipelineOverrides
 from .sources.fs import LocalDirSource
 from .sources.githubio import GitHubZipSource
 from .sources.sources_webpdf import WebPdfListSource, WebPagePdfSource
@@ -78,12 +96,13 @@ from .core.naming import (
     build_output_basename_github,
     build_output_basename_pdf,
 )
-from .cli.licenses import detect_license_in_tree, detect_license_in_zip
+from .core.licenses import detect_license_in_tree, detect_license_in_zip
 
 
 # ---------------------------------------------------------------------------
 # Advanced / expert API (subject to change)
 # ---------------------------------------------------------------------------
+from .core.builder import PipelinePlan, PipelineRuntime
 from .core.log import get_logger, configure_logging, temp_level
 from .sources.fs import (
     DEFAULT_SKIP_DIRS,
@@ -129,6 +148,7 @@ from .core.records import (
 from .core.convert import (
     DefaultExtractor,
     iter_records_from_bytes,
+    iter_records_from_bytes_with_plan,
     iter_records_from_file_item,
     list_records_for_file,
     list_records_from_bytes,
@@ -162,6 +182,7 @@ PRIMARY_API = [
     "__version__",
     "RepocapsuleConfig",
     "load_config_from_path",
+    "PipelineOverrides",
     "LanguageConfig",
     "convert",
     "best_effort_record_path",
@@ -185,6 +206,7 @@ PRIMARY_API = [
     "is_summary_record",
     "list_records_for_file",
     "list_records_from_bytes",
+    "iter_records_from_bytes_with_plan",
     "make_records_for_file",
     "make_records_from_bytes",
     "build_output_basename_github",

@@ -17,8 +17,16 @@ from typing import (
     Tuple,
 )
 
-from .config import RepocapsuleConfig, SourceSpec, SinkSpec, QCConfig
-from .interfaces import Source, Sink, SourceFactory, SinkFactory, QualityScorer
+from .config import RepocapsuleConfig, SourceSpec, SinkSpec
+from .interfaces import (
+    Source,
+    Sink,
+    SourceFactory,
+    SinkFactory,
+    QualityScorer,
+    SourceFactoryContext,
+    SinkFactoryContext,
+)
 from .log import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - type-only deps
@@ -32,13 +40,13 @@ class SourceRegistry:
     def register(self, factory: SourceFactory) -> None:
         self._factories[factory.id] = factory
 
-    def build_all(self, cfg: RepocapsuleConfig) -> List[Source]:
+    def build_all(self, ctx: SourceFactoryContext, specs: Sequence[SourceSpec]) -> List[Source]:
         out: List[Source] = []
-        for spec in cfg.sources.specs:
+        for spec in specs:
             factory = self._factories.get(spec.kind)
             if factory is None:
                 raise ValueError(f"Unknown source kind {spec.kind!r}")
-            out.extend(factory.build(cfg, spec))
+            out.extend(factory.build(ctx, spec))
         return out
 
 
@@ -49,20 +57,26 @@ class SinkRegistry:
     def register(self, factory: SinkFactory) -> None:
         self._factories[factory.id] = factory
 
-    def build_all(self, cfg: RepocapsuleConfig) -> Tuple[List[Sink], Mapping[str, Any]]:
+    def build_all(self, ctx: SinkFactoryContext, specs: Sequence[SinkSpec]) -> Tuple[List[Sink], Mapping[str, Any], SinkFactoryContext]:
         sinks: List[Sink] = []
         merged_meta: Dict[str, Any] = {}
-        for spec in cfg.sinks.specs:
+        current_ctx = ctx
+        for spec in specs:
             factory = self._factories.get(spec.kind)
             if factory is None:
                 raise ValueError(f"Unknown sink kind {spec.kind!r}")
-            result: "SinkFactoryResult" = factory.build(cfg, spec)
+            result: "SinkFactoryResult" = factory.build(current_ctx, spec)
             sinks.extend(result.sinks)
             for k, v in result.metadata.items():
                 if k not in merged_meta or merged_meta[k] is None:
                     merged_meta[k] = v
-            cfg.sinks = result.sink_config
-        return sinks, merged_meta
+            # Propagate any sink_config updates back into the context so that
+            # subsequent factories see the latest settings.
+            current_ctx = SinkFactoryContext(
+                repo_context=result.sink_config.context or current_ctx.repo_context,
+                sink_config=result.sink_config,
+            )
+        return sinks, merged_meta, current_ctx
 
 
 class BytesHandlerRegistry:
@@ -79,7 +93,7 @@ class BytesHandlerRegistry:
 class QualityScorerFactory(Protocol):
     id: str
 
-    def build(self, cfg: QCConfig) -> QualityScorer:
+    def build(self, options: Mapping[str, Any]) -> QualityScorer:
         ...
 
 
@@ -87,6 +101,7 @@ class QualityScorerRegistry:
     def __init__(self) -> None:
         self._factories: Dict[str, QualityScorerFactory] = {}
         self.log = get_logger(__name__)
+        # DEFAULT_QC_SCORER_ID is used when qc.scorer_id is None and a default scorer is registered.
 
     def register(self, factory: QualityScorerFactory) -> None:
         self._factories[factory.id] = factory
@@ -99,12 +114,17 @@ class QualityScorerRegistry:
         first_key = next(iter(self._factories))
         return self._factories[first_key]
 
-    def build(self, cfg: QCConfig, *, factory_id: Optional[str] = None) -> Optional[QualityScorer]:
+    def build(
+        self,
+        options: Mapping[str, Any],
+        *,
+        factory_id: Optional[str] = None,
+    ) -> Optional[QualityScorer]:
         factory = self.get(factory_id)
         if factory is None:
             return None
         try:
-            return factory.build(cfg)
+            return factory.build(options)
         except Exception as exc:
             self.log.warning("Quality scorer factory %s failed: %s", getattr(factory, "id", None), exc)
             return None

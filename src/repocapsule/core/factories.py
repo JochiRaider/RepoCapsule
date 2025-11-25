@@ -1,3 +1,5 @@
+# factories.py
+# SPDX-License-Identifier: MIT
 """
 Factory helpers for building clients, sources, sinks, and derived paths.
 
@@ -20,7 +22,16 @@ from typing import (
     Tuple,
 )
 
-from .interfaces import RepoContext, Record, Sink, Source, SourceFactory, SinkFactory
+from .interfaces import (
+    RepoContext,
+    Record,
+    Sink,
+    Source,
+    SourceFactory,
+    SinkFactory,
+    SourceFactoryContext,
+    SinkFactoryContext,
+)
 from ..sinks.sinks import JSONLSink, GzipJSONLSink, PromptTextSink
 from ..sources.fs import PatternFileSource
 from ..sources.sources_webpdf import WebPdfListSource, WebPagePdfSource
@@ -226,15 +237,21 @@ def make_pattern_file_source(
 class LocalDirSourceFactory(SourceFactory):
     id: str = "local_dir"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         root = spec.options.get("root_dir")
         if root is None:
             raise ValueError("local_dir source spec requires root_dir")
-        ctx = cfg.sinks.context
+        repo_ctx = ctx.repo_context
+        # For now, keep using the typed LocalDirSourceConfig; per-kind defaults
+        # come from the registered id.
+        from .config import LocalDirSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {})
+        local_cfg = LocalDirSourceConfig(**dict(defaults)) if defaults else LocalDirSourceConfig()
         src = make_local_dir_source(
             root=root,
-            config=cfg.sources.local,
-            context=ctx,
+            config=local_cfg,
+            context=repo_ctx,
         )
         return [src]
 
@@ -243,17 +260,21 @@ class LocalDirSourceFactory(SourceFactory):
 class GitHubZipSourceFactory(SourceFactory):
     id: str = "github_zip"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         url = spec.options.get("url")
         if url is None:
             raise ValueError("github_zip source spec requires url")
-        ctx = cfg.sinks.context
-        http_client = cfg.http.build_client()
+        repo_ctx = ctx.repo_context
+        http_client = ctx.http_client or ctx.http_config.build_client()
+        from .config import GitHubSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {})
+        gh_cfg = GitHubSourceConfig(**dict(defaults)) if defaults else GitHubSourceConfig()
         src = make_github_zip_source(
             url,
-            config=cfg.sources.github,
-            context=ctx,
-            download_timeout=cfg.http.timeout,
+            config=gh_cfg,
+            context=repo_ctx,
+            download_timeout=ctx.http_config.timeout,
             http_client=http_client,
         )
         return [src]
@@ -263,19 +284,23 @@ class GitHubZipSourceFactory(SourceFactory):
 class WebPdfListSourceFactory(SourceFactory):
     id: str = "web_pdf_list"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         urls = spec.options.get("urls")
         if not urls:
             raise ValueError("web_pdf_list source spec requires urls")
+        from .config import PdfSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {}) or ctx.source_defaults.get("pdf", {})
+        pdf_cfg = PdfSourceConfig(**dict(defaults)) if defaults else PdfSourceConfig()
         src = WebPdfListSource(
             urls,
-            timeout=cfg.sources.pdf.timeout,
-            max_pdf_bytes=cfg.sources.pdf.max_pdf_bytes,
-            require_pdf=cfg.sources.pdf.require_pdf,
+            timeout=pdf_cfg.timeout,
+            max_pdf_bytes=pdf_cfg.max_pdf_bytes,
+            require_pdf=pdf_cfg.require_pdf,
             add_prefix=spec.options.get("add_prefix"),
-            retries=cfg.sources.pdf.retries,
-            config=cfg.sources.pdf,
-            client=cfg.sources.pdf.client or cfg.http.build_client(),
+            retries=pdf_cfg.retries,
+            config=pdf_cfg,
+            client=pdf_cfg.client or ctx.http_client or ctx.http_config.build_client(),
         )
         return [src]
 
@@ -284,18 +309,22 @@ class WebPdfListSourceFactory(SourceFactory):
 class WebPagePdfSourceFactory(SourceFactory):
     id: str = "web_page_pdf"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         page_url = spec.options.get("page_url")
         if page_url is None:
             raise ValueError("web_page_pdf source spec requires page_url")
+        from .config import PdfSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {}) or ctx.source_defaults.get("pdf", {})
+        pdf_cfg = PdfSourceConfig(**dict(defaults)) if defaults else PdfSourceConfig()
         src = WebPagePdfSource(
             page_url,
-            max_links=cfg.sources.pdf.max_links,
-            require_pdf=cfg.sources.pdf.require_pdf,
-            include_ambiguous=cfg.sources.pdf.include_ambiguous,
+            max_links=pdf_cfg.max_links,
+            require_pdf=pdf_cfg.require_pdf,
+            include_ambiguous=pdf_cfg.include_ambiguous,
             add_prefix=spec.options.get("add_prefix"),
-            config=cfg.sources.pdf,
-            client=cfg.sources.pdf.client or cfg.http.build_client(),
+            config=pdf_cfg,
+            client=pdf_cfg.client or ctx.http_client or ctx.http_config.build_client(),
         )
         return [src]
 
@@ -304,11 +333,14 @@ class WebPagePdfSourceFactory(SourceFactory):
 class SQLiteSourceFactory(SourceFactory):
     id: str = "sqlite"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         from ..sources.sqlite_source import SQLiteSource
 
         options = spec.options or {}
-        sqlite_cfg = cfg.sources.sqlite
+        from .config import SQLiteSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {}) or ctx.source_defaults.get("sqlite", {})
+        sqlite_cfg = SQLiteSourceConfig(**dict(defaults)) if defaults else SQLiteSourceConfig()
 
         db_path_str = options.get("db_path")
         if not db_path_str:
@@ -324,17 +356,17 @@ class SQLiteSourceFactory(SourceFactory):
         where = options.get("where")
 
         batch_size = options.get("batch_size", sqlite_cfg.batch_size)
-        download_timeout = options.get("download_timeout", cfg.http.timeout)
+        download_timeout = options.get("download_timeout", ctx.http_config.timeout)
         download_max_bytes = options.get("download_max_bytes", sqlite_cfg.download_max_bytes)
         retries = options.get("retries", sqlite_cfg.retries)
 
         db_path = Path(db_path_str)
-        ctx = cfg.sinks.context
-        client = cfg.http.build_client()
+        repo_ctx = ctx.repo_context
+        client = ctx.http_client or ctx.http_config.build_client()
 
         src = SQLiteSource(
             db_path=db_path,
-            context=ctx,
+            context=repo_ctx,
             table=table,
             sql=sql,
             text_columns=text_columns,
@@ -354,11 +386,14 @@ class SQLiteSourceFactory(SourceFactory):
 class CsvTextSourceFactory(SourceFactory):
     id: str = "csv_text"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SourceSpec") -> Sequence[Source]:
+    def build(self, ctx: SourceFactoryContext, spec: "SourceSpec") -> Sequence[Source]:
         from ..sources.csv_source import CSVTextSource
 
         options = spec.options or {}
-        csv_cfg = cfg.sources.csv
+        from .config import CsvSourceConfig  # type: ignore
+
+        defaults = ctx.source_defaults.get(self.id, {}) or ctx.source_defaults.get("csv", {})
+        csv_cfg = CsvSourceConfig(**dict(defaults)) if defaults else CsvSourceConfig()
         raw_paths = options.get("paths") or options.get("path")
         if not raw_paths:
             raise ValueError("csv_text source spec requires 'paths' (list) or 'path'")
@@ -375,11 +410,11 @@ class CsvTextSourceFactory(SourceFactory):
         text_column_index = options.get("text_column_index", 0)
 
         norm_paths = [Path(p) for p in paths]
-        ctx = cfg.sinks.context
+        repo_ctx = ctx.repo_context
 
         src = CSVTextSource(
             paths=tuple(norm_paths),
-            context=ctx,
+            context=repo_ctx,
             text_column=text_column,
             delimiter=delimiter,
             encoding=encoding,
@@ -393,18 +428,18 @@ class CsvTextSourceFactory(SourceFactory):
 class DefaultJsonlPromptSinkFactory(SinkFactory):
     id: str = "default_jsonl_prompt"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SinkSpec") -> SinkFactoryResult:
+    def build(self, ctx: SinkFactoryContext, spec: "SinkSpec") -> SinkFactoryResult:
         jsonl_path = spec.options.get("jsonl_path")
         if jsonl_path is None:
             raise ValueError("default_jsonl_prompt sink spec requires jsonl_path")
         prompt_path = spec.options.get("prompt_path")
-        sink_cfg = cfg.sinks
-        ctx = sink_cfg.context
+        sink_cfg = ctx.sink_config
+        repo_ctx = sink_cfg.context or ctx.repo_context
         return build_default_sinks(
             sink_cfg,
             jsonl_path=jsonl_path,
             prompt_path=prompt_path,
-            context=ctx,
+            context=repo_ctx,
         )
 
 
@@ -412,8 +447,8 @@ class DefaultJsonlPromptSinkFactory(SinkFactory):
 class ParquetDatasetSinkFactory(SinkFactory):
     id: str = "parquet_dataset"
 
-    def build(self, cfg: "RepocapsuleConfig", spec: "SinkSpec") -> SinkFactoryResult:
-        sink_cfg = cfg.sinks
+    def build(self, ctx: SinkFactoryContext, spec: "SinkSpec") -> SinkFactoryResult:
+        sink_cfg = ctx.sink_config
         options = spec.options or {}
         path = options.get("path")
         if path is None:
@@ -450,7 +485,7 @@ class ParquetDatasetSinkFactory(SinkFactory):
             compression=compression,
             overwrite=overwrite,
         )
-        jsonl_path = sink_cfg.primary_jsonl_name or str(cfg.metadata.primary_jsonl or "")
+        jsonl_path = sink_cfg.primary_jsonl_name or ""
         metadata = {"parquet_path": str(path)}
         return SinkFactoryResult(
             jsonl_path=jsonl_path,
@@ -493,7 +528,9 @@ def make_qc_scorer(
     except Exception:
         pass
     reg = scorer_registry or quality_scorer_registry
-    scorer = reg.build(qc_cfg)
+    options = dict(getattr(qc_cfg, "scorer_options", {}) or {})
+    factory_id = getattr(qc_cfg, "scorer_id", None)
+    scorer = reg.build(options, factory_id=factory_id)
     if scorer is None:
         return None
     if not new_instance:
