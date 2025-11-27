@@ -13,13 +13,13 @@ from typing import Optional, Sequence
 from ..core.config import RepocapsuleConfig, load_config_from_path
 from ..core.dataset_card import build_dataset_card_from_fragments
 from ..core.log import configure_logging
+from ..core.qc_post import _run_post_qc
 from .runner import (
     convert,
     convert_local_dir,
     convert_github,
     make_local_repo_config,
     make_github_repo_config,
-    _run_post_qc,
 )
 
 try:  # pragma: no cover - optional dependency

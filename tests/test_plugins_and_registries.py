@@ -4,14 +4,20 @@ from types import SimpleNamespace
 
 import pytest
 
+from repocapsule.core.builder import build_pipeline_plan
+from repocapsule.core.factories import SinkFactoryResult
 from repocapsule.core.plugins import load_entrypoint_plugins
 from repocapsule.core.registries import (
     BytesHandlerRegistry,
     QualityScorerRegistry,
     SinkRegistry,
     SourceRegistry,
+    RegistryBundle,
+    bytes_handler_registry,
+    default_registries,
     default_sink_registry,
     default_source_registry,
+    quality_scorer_registry,
 )
 from repocapsule.core.config import RepocapsuleConfig, SourceSpec, SinkSpec
 from repocapsule.core.interfaces import SourceFactoryContext, SinkFactoryContext
@@ -103,3 +109,136 @@ def test_default_sink_registry_has_expected_ids():
     kinds = set(registry._factories.keys())
     assert "default_jsonl_prompt" in kinds
     assert "parquet_dataset" in kinds
+
+
+def test_default_registries_populates_defaults():
+    bundle = default_registries(load_plugins=False)
+
+    assert {"local_dir", "github_zip", "web_pdf_list", "web_page_pdf", "csv_text", "sqlite"}.issubset(
+        bundle.sources._factories
+    )
+    assert {"default_jsonl_prompt", "parquet_dataset"}.issubset(bundle.sinks._factories)
+    assert bundle.bytes is bytes_handler_registry
+    assert bundle.scorers is quality_scorer_registry
+
+
+def test_default_registries_load_plugins_calls_loader(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_loader(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("repocapsule.core.plugins.load_entrypoint_plugins", fake_loader)
+
+    default_registries(load_plugins=False)
+    assert calls == []
+
+    bundle = default_registries(load_plugins=True)
+    assert len(calls) == 1
+    assert calls[0]["source_registry"] is bundle.sources
+    assert calls[0]["sink_registry"] is bundle.sinks
+    assert calls[0]["bytes_registry"] is bundle.bytes
+    assert calls[0]["scorer_registry"] is bundle.scorers
+
+
+class DummySource:
+    def __init__(self, label: str):
+        self.label = label
+
+    def iter_files(self):
+        return ()
+
+
+class DummySourceFactory:
+    id = "dummy_source"
+
+    def __init__(self, label: str):
+        self.label = label
+
+    def build(self, ctx, spec):
+        return [DummySource(spec.options.get("label", self.label))]
+
+
+class DummySink:
+    def __init__(self, name: str):
+        self.name = name
+
+    def write(self, record):
+        return None
+
+    def close(self):
+        return None
+
+
+class DummySinkFactory:
+    id = "dummy_sink"
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def build(self, ctx, spec):
+        jsonl_path = spec.options.get("jsonl_path", "dummy.jsonl")
+        return SinkFactoryResult(
+            jsonl_path=jsonl_path,
+            sinks=[DummySink(self.name)],
+            sink_config=ctx.sink_config,
+            metadata={"primary_jsonl": jsonl_path},
+        )
+
+
+def test_build_pipeline_plan_uses_custom_bundle(monkeypatch, tmp_path):
+    source_reg = SourceRegistry()
+    source_reg.register(DummySourceFactory(label="bundle"))
+    sink_reg = SinkRegistry()
+    sink_reg.register(DummySinkFactory(name="bundle"))
+    bundle = RegistryBundle(
+        sources=source_reg,
+        sinks=sink_reg,
+        bytes=BytesHandlerRegistry(),
+        scorers=QualityScorerRegistry(),
+    )
+
+    def fail_default_registries(*args, **kwargs):
+        raise AssertionError("default_registries should not be called when registries are provided")
+
+    monkeypatch.setattr("repocapsule.core.builder.default_registries", fail_default_registries)
+
+    cfg = RepocapsuleConfig()
+    cfg.sources.specs = (SourceSpec(kind="dummy_source", options={"label": "from_bundle"}),)
+    cfg.sinks.specs = (SinkSpec(kind="dummy_sink", options={"jsonl_path": str(tmp_path / "data.jsonl")}),)
+
+    plan = build_pipeline_plan(cfg, registries=bundle, load_plugins=False)
+    assert isinstance(plan.runtime.sources[0], DummySource)
+    assert plan.runtime.sources[0].label == "from_bundle"
+    assert isinstance(plan.runtime.sinks[0], DummySink)
+    assert plan.runtime.sinks[0].name == "bundle"
+
+
+def test_build_pipeline_plan_per_registry_override_wins_over_bundle(monkeypatch, tmp_path):
+    bundle_source_reg = SourceRegistry()
+    bundle_source_reg.register(DummySourceFactory(label="bundle"))
+    override_source_reg = SourceRegistry()
+    override_source_reg.register(DummySourceFactory(label="override"))
+    sink_reg = SinkRegistry()
+    sink_reg.register(DummySinkFactory(name="bundle"))
+    bundle = RegistryBundle(
+        sources=bundle_source_reg,
+        sinks=sink_reg,
+        bytes=BytesHandlerRegistry(),
+        scorers=QualityScorerRegistry(),
+    )
+
+    def fail_default_registries(*args, **kwargs):
+        raise AssertionError("default_registries should not be called when registries are provided")
+
+    monkeypatch.setattr("repocapsule.core.builder.default_registries", fail_default_registries)
+
+    cfg = RepocapsuleConfig()
+    cfg.sources.specs = (SourceSpec(kind="dummy_source", options={}),)
+    cfg.sinks.specs = (SinkSpec(kind="dummy_sink", options={"jsonl_path": str(tmp_path / "custom.jsonl")}),)
+
+    plan = build_pipeline_plan(cfg, registries=bundle, source_registry=override_source_reg, load_plugins=False)
+    assert isinstance(plan.runtime.sources[0], DummySource)
+    assert plan.runtime.sources[0].label == "override"
+    assert isinstance(plan.runtime.sinks[0], DummySink)
+    assert plan.runtime.sinks[0].name == "bundle"

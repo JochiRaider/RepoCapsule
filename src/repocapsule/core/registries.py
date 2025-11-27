@@ -27,11 +27,13 @@ from .interfaces import (
     QualityScorer,
     SourceFactoryContext,
     SinkFactoryContext,
+    RunLifecycleHook,
 )
 from .log import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - type-only deps
     from .factories import SinkFactoryResult
+    from .builder import PipelineRuntime
 
 
 @dataclass
@@ -190,6 +192,34 @@ class QualityScorerRegistry:
         return tuple(self._factories.keys())
 
 
+class LifecycleHookFactory(Protocol):
+    """Protocol describing lifecycle hook factories."""
+
+    id: str
+
+    def build(self, cfg: RepocapsuleConfig, runtime: "PipelineRuntime") -> RunLifecycleHook:
+        ...
+
+
+class LifecycleHookRegistry:
+    """Registry for lifecycle hook factories keyed by id."""
+
+    def __init__(self) -> None:
+        self._factories: Dict[str, LifecycleHookFactory] = {}
+
+    def register(self, factory: LifecycleHookFactory) -> None:
+        self._factories[factory.id] = factory
+
+    def build_all(self, cfg: RepocapsuleConfig, runtime: "PipelineRuntime", ids: Sequence[str]) -> list[RunLifecycleHook]:
+        hooks: list[RunLifecycleHook] = []
+        for hook_id in ids:
+            factory = self._factories.get(hook_id)
+            if factory is None:
+                raise ValueError(f"Unknown lifecycle hook {hook_id!r}")
+            hooks.append(factory.build(cfg, runtime))
+        return hooks
+
+
 def default_source_registry() -> SourceRegistry:
     """Build a SourceRegistry populated with the default factories."""
     from .factories import (
@@ -221,5 +251,61 @@ def default_sink_registry() -> SinkRegistry:
     return reg
 
 
+# Shared registries that can be reused across runs.
 bytes_handler_registry = BytesHandlerRegistry()
 quality_scorer_registry = QualityScorerRegistry()
+
+
+@dataclass(slots=True)
+class RegistryBundle:
+    """Bundle of registries used to build a pipeline.
+
+    This makes plugin and registry configuration explicit for
+    advanced callers and tests.
+    """
+
+    sources: SourceRegistry
+    sinks: SinkRegistry
+    bytes: BytesHandlerRegistry
+    scorers: QualityScorerRegistry
+
+
+def default_registries(*, load_plugins: bool = True) -> RegistryBundle:
+    """Return a bundle of default registries, optionally with plugins loaded."""
+    from .plugins import load_entrypoint_plugins  # local import to avoid cycles
+
+    source_reg = default_source_registry()
+    sink_reg = default_sink_registry()
+    bytes_reg = bytes_handler_registry
+    scorer_reg = quality_scorer_registry
+
+    if load_plugins:
+        load_entrypoint_plugins(
+            source_registry=source_reg,
+            sink_registry=sink_reg,
+            bytes_registry=bytes_reg,
+            scorer_registry=scorer_reg,
+        )
+
+    return RegistryBundle(
+        sources=source_reg,
+        sinks=sink_reg,
+        bytes=bytes_reg,
+        scorers=scorer_reg,
+    )
+
+
+__all__ = [
+    "SourceRegistry",
+    "SinkRegistry",
+    "BytesHandlerRegistry",
+    "QualityScorerRegistry",
+    "LifecycleHookFactory",
+    "LifecycleHookRegistry",
+    "RegistryBundle",
+    "default_source_registry",
+    "default_sink_registry",
+    "default_registries",
+    "bytes_handler_registry",
+    "quality_scorer_registry",
+]

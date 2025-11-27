@@ -1,13 +1,14 @@
 # RepoCapsule
 Library-first, config-driven pipeline that turns repositories, logs, and other text/structured sources into normalized JSONL and Parquet datasets for LLM fine-tuning and analysis.
 
-Define a pipeline once in Python or TOML (`RepocapsuleConfig`), run it via a small set of helpers (`convert_local_dir`, `convert_github`, `convert`), and get a stable record schema and dataset card fragments. Requires Python 3.11+. Specs are strictly declarative; all runtime objects (clients, sources/sinks, extractors/handlers, scorers) live in `PipelineRuntime` and are injected via registries or `PipelineOverrides`.
+Define a pipeline once in Python or TOML (`RepocapsuleConfig`), run it via a small set of helpers (`convert_local_dir`, `convert_github`, `convert`), and get a stable record schema and dataset card fragments. Requires Python 3.11+. Specs are strictly declarative; all runtime objects (clients, sources/sinks, extractors/handlers, scorers, lifecycle hooks) live in `PipelineRuntime` and are injected via registries or `PipelineOverrides`.
 
 ## Key features
 - **Sources (ingest):** Local directories, GitHub zipballs, web PDFs (page scrape or URL list), CSV/TSV, and SQLite tables/queries. Optional bytes handlers (PDF/EVTX/Parquet) activate when extras are installed. All are configured via `SourceConfig` and declarative `[[sources.specs]]` entries (see `core/config.py` and `example_config.toml`), and implemented under `src/repocapsule/sources`.
 - **Processing (decode → chunk → extract → records):** Safe decoding with Unicode normalization and mojibake repair (`core/decode.py`), document/code-aware chunking with token targets and overlap (`ChunkPolicy` in `core/chunk.py`), optional extractors (e.g., Markdown→KQL in `core/extras/md_kql.py`), and record-building in `core/convert.py` / `core/records.py`. Repo-level metadata flows via `RepoContext` and `RunMetadata`.
 - **Sinks (outputs):** JSONL (plain or gzipped) plus grouped prompt-text, and a Parquet dataset sink (via the `[parquet]` extra) implemented in `src/repocapsule/sinks`. Sinks are configured through `SinkConfig` and `[[sinks.specs]]` (e.g., `default_jsonl_prompt`, `parquet_dataset`) and can participate in run finalization.
-- **Quality control (optional):** Inline/advisory/post QC modes (`QCConfig` / `QCMode` in `core/config.py`) with heuristics, near-duplicate detection, CSV export, and customizable scorers (`QualityScorer` in `core/interfaces.py`, implemented in `core/extras/qc.py`). The default scorer is registered via `QualityScorerRegistry` under `DEFAULT_QC_SCORER_ID` (`jsonl_default`); QC uses utilities from `core/qc_utils.py` and wiring in `core/qc_controller.py` and `cli/runner.py`.
+- **Quality control (optional):** Inline/advisory/post QC modes (`QCConfig` / `QCMode` in `core/config.py`) with heuristics, near-duplicate detection, CSV export, and customizable scorers (`QualityScorer` in `core/interfaces.py`, implemented in `core/extras/qc.py`). The default scorer is registered via `QualityScorerRegistry` under `DEFAULT_QC_SCORER_ID` (`jsonl_default`); QC uses utilities from `core/qc_utils.py` and lifecycle hooks in `core/qc_controller.py` (`InlineQCHook`) and `core/qc_post.py` (`PostQCHook`).
+- **Lifecycle hooks:** Run-level callbacks (`RunLifecycleHook` / `RunContext`) invoked at start, per-record, and end of every run. Hooks drive QC, run-summary records, and dataset-card fragments (`PipelineRuntime.lifecycle_hooks` assembled by the builder).
 - **Dataset cards:** Each run can emit Hugging Face–style dataset-card fragments (`*.card.json`) alongside the primary JSONL, then merge them into a final Markdown card using helpers in `dataset_card.py` controlled by `[dataset_card]` in the config.
 - **Extensibility:** Registries (`core/registries.py`) and entry-point plugins (`repocapsule.plugins` via `core/plugins.py`) allow new sources, sinks, bytes handlers, and QC scorers to be registered without modifying the core pipeline. New features should plug into the registries and builder, not bypass them.
 
@@ -248,6 +249,7 @@ See `example_config.toml` for every knob (includes HTTP, logging, QC heuristics,
 - **New bytes handler:** Register `(sniff, handler)` with `BytesHandlerRegistry` (e.g., for new binary formats). Handlers return iterable records given bytes, relative path, optional `RepoContext`, and optional `ChunkPolicy`.
 - **Custom QC scorer:** Implement `QualityScorer` or a factory with an `id` and `build(cfg: QCConfig)`. Register via `quality_scorer_registry` or a plugin. Keep `qc.scorer` unset in declarative configs; use the registry instead.
 - **Plugins:** Publish an entry point under `repocapsule.plugins` that receives all registries and performs registrations.
+- For advanced scenarios, construct a `RegistryBundle` and pass it to `build_pipeline_plan(registries=...)` to control registry contents and plugin loading.
 
 ## Conventions for contributors
 - **File layout:** New ingestion code lives under `src/repocapsule/sources/`, new sinks under `src/repocapsule/sinks/`, QC-related helpers under `src/repocapsule/core/extras/` or `src/repocapsule/core/`, and orchestration/CLI helpers under `src/repocapsule/cli/`. Keep new modules cohesive and small.
@@ -339,11 +341,10 @@ Rule of thumb: **Keep `meta` stable and additive; don’t break existing keys th
 Goal: “I want to change how quality scores are computed, what gets dropped, or what is exported.”
 
 1. Start with `QCConfig` / `QCHeuristics` in `core/config.py` and `core/qc_utils.py`.
-2. Implement or extend a `QualityScorer` (`core/interfaces.py`), or use `JSONLQualityScorer` (`qc.py`) as a reference.
-3. Wrap new scorers in a `QualityScorerFactory` and register with `quality_scorer_registry` (`core/registries.py` / `core/factories.py`).
-4. For inline/advisory QC, see `InlineQCController` and `QCSummaryTracker` in `core/qc_controller.py`.
-5. For post-QC, see `qc.py` and how `run_engine` uses `QCConfig` to drive post-processing.
-   - Pick a scorer via `qc.scorer_id` (None = registry default) and pass scorer-specific settings via `qc.scorer_options` (a free-form mapping). The built-in heuristics scorer reads overrides from `qc.scorer_options.heuristics`.
+2. Implement `QualityScorer.score_record` (`core/interfaces.py`). Tiny scorers only need that method; JSONL/CSV handling is centralized in `core/qc_post`.
+3. Wrap new scorers in a `QualityScorerFactory` and register with `quality_scorer_registry` (`core/registries.py` / `core/factories.py`). `JSONLQualityScorer` (`extras/qc.py`) remains the default reference implementation.
+4. For inline/advisory QC, see `InlineQCController` and `QCSummaryTracker` in `core/qc_controller.py`; the pipeline calls only `score_record` during the run.
+5. For post-QC and inline CSV export, see `core/qc_post.py` (driver functions like `run_qc_over_jsonl`). Pick a scorer via `qc.scorer_id` (None = registry default) and pass scorer-specific settings via `qc.scorer_options` (a free-form mapping). The built-in heuristics scorer reads overrides from `qc.scorer_options.heuristics`.
 
 Rule of thumb: **New QC logic should be expressed as scorers + heuristics, not baked into sources or sinks.**
 

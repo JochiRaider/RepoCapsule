@@ -26,6 +26,7 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
         SinkSpec,
         HttpConfig,
     )
+    from .pipeline import PipelineRuntime, PipelineStats
     from .factories import SinkFactoryResult
     from .safe_http import SafeHttpClient
 
@@ -110,9 +111,69 @@ class RepoContext:
         return meta
 
 
+@dataclass(slots=True, frozen=True)
+class RunContext:
+    """Context object passed to lifecycle hooks for a pipeline run."""
+
+    cfg: "RepocapsuleConfig"
+    stats: "PipelineStats"
+    runtime: "PipelineRuntime"
+
+
 # A JSONL record shape is intentionally loose: dict-like with string keys.
 Record = Mapping[str, Any]
 
+@dataclass(slots=True, frozen=True)
+class RunSummaryView:
+    """Lightweight view of run-level stats."""
+
+    num_records: int
+    ext_counts: Mapping[str, int]
+    qc_summary: Mapping[str, Any] | None
+    primary_jsonl_path: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class RunArtifacts:
+    """
+    Bundle of run-level artifacts produced at the end of a pipeline run.
+
+    Attributes:
+        summary_record: JSONL-ready run summary record (using RunSummaryMeta).
+        summary_view: Lightweight summary view derived from PipelineStats.
+    """
+
+    summary_record: Record
+    summary_view: RunSummaryView
+
+# -----------------------------------------------------------------------------
+# Lifecycle hook protocols
+# -----------------------------------------------------------------------------
+
+
+class RunLifecycleHook(Protocol):
+    """Hook for reacting to pipeline lifecycle events."""
+
+    def on_run_start(self, ctx: RunContext) -> None:  # pragma: no cover - interface
+        """Called once at the start of a pipeline run."""
+
+    def on_record(self, record: Record) -> Record | None:  # pragma: no cover - interface
+        """Called for each record; returning ``None`` drops the record."""
+
+    def on_run_end(self, ctx: RunContext) -> None:  # pragma: no cover - interface
+        """Called once after the pipeline finishes (success or failure)."""
+
+    def on_artifacts(self, artifacts: RunArtifacts, ctx: RunContext) -> None:  # pragma: no cover - interface
+        """
+        Called once after run-level artifacts (summary record + summary view)
+        have been computed.
+        Default for many hooks is a no-op.
+        """
+
+
+# -----------------------------------------------------------------------------
+# Record hook protocols
+# -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # Record hook protocols
 # -----------------------------------------------------------------------------
@@ -319,11 +380,12 @@ class Sink(Protocol):
 @runtime_checkable
 class QualityScorer(Protocol):
     """
-    Minimal contract for quality scorers used in inline or post-processing modes.
+    Core contract for quality scorers used in inline or post-processing modes.
 
-    Implementers may optionally provide:
-    - ``clone_for_parallel()`` → return a fresh scorer for worker processes in parallel post-QC.
-    - ``reset_state()`` → clear incremental state before rescoring JSONL for CSV export.
+    Core contract: ``score_record(record)`` returns a QC result mapping. Scorers
+    *may* implement ``score_jsonl_path`` and/or ``clone_for_parallel`` as
+    optimization hooks, but the core pipeline only relies on ``score_record``.
+    Implementers may also expose ``reset_state`` to clear caches between runs.
     """
 
     def score_record(self, record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -337,16 +399,12 @@ class QualityScorer(Protocol):
             Dict[str, Any]: Per-record QC metrics.
         """
 
-    def score_jsonl_path(self, path: str) -> Iterable[Dict[str, Any]]:
-        """
-        Iterate QC metrics for every record within a JSONL file.
 
-        Args:
-            path (str): Path to the JSONL file to score.
+class JsonlAwareScorer(QualityScorer, Protocol):
+    """Extension for scorers that can handle JSONL files or parallel clones."""
 
-        Returns:
-            Iterable[Dict[str, Any]]: QC rows corresponding to each record.
-        """
+    def score_jsonl_path(self, path: str, **kwargs: Any) -> Iterable[Dict[str, Any]]:  # pragma: no cover - optional
+        """Iterate QC metrics for every record within a JSONL file."""
 
     def clone_for_parallel(self) -> "QualityScorer":  # pragma: no cover - optional
         """Return a fresh scorer for use in parallel workers."""
@@ -394,21 +452,12 @@ class SinkFactory(Protocol):
 
 @runtime_checkable
 class RecordMiddleware(Protocol):
-    """
-    Per-record middleware that can transform or drop a record.
-    Returning None drops the record.
-    """
+    """Per-record middleware that can transform or drop a record."""
 
-    def process(self, record: Record) -> Optional[Record]:
-        """
-        Inspect or modify a record before downstream handling.
+    def __call__(self, record: Record) -> Optional[Record]:  # pragma: no cover - interface
+        ...
 
-        Args:
-            record (Record): Input record.
-
-        Returns:
-            Record | None: Transformed record, or ``None`` to drop it.
-        """
+    def process(self, record: Record) -> Optional[Record]:  # pragma: no cover - interface
         ...
 
 
@@ -431,6 +480,25 @@ class FileMiddleware(Protocol):
             Iterable[Record] | None: Updated records, or ``None`` to drop all.
         """
         ...
+
+
+class MiddlewareHook(RunLifecycleHook):
+    """Adapt a call-style middleware into a lifecycle hook."""
+
+    def __init__(self, middleware: RecordMiddleware):
+        self._mw = middleware
+
+    def on_run_start(self, ctx: RunContext) -> None:  # pragma: no cover - no-op
+        return None
+
+    def on_record(self, record: Record) -> Record | None:
+        return self._mw(record) if hasattr(self._mw, "__call__") else record
+
+    def on_run_end(self, ctx: RunContext) -> None:  # pragma: no cover - no-op
+        return None
+
+    def on_artifacts(self, artifacts: RunArtifacts, ctx: RunContext) -> None:  # pragma: no cover - no-op
+        return None
 
 
 @runtime_checkable
@@ -489,7 +557,11 @@ class SinkFactoryContext:
 __all__ = [
     "FileItem",
     "RepoContext",
+    "RunContext",
+    "RunSummaryView",
+    "RunArtifacts",
     "Record",
+    "RunLifecycleHook",
     "Source",
     "Extractor",
     "FileExtractor",
@@ -504,5 +576,6 @@ __all__ = [
     "RecordObserver",
     "RecordMiddleware",
     "FileMiddleware",
+    "MiddlewareHook",
     "ConcurrencyProfile",
 ]

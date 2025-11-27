@@ -61,9 +61,9 @@ except Exception:
 
 # Example GitHub repo to test:
 # URL = "https://github.com/pallets/flask/tree/main/docs"
-URL = "https://github.com/JochiRaider/URL_Research_Tool"
+# URL = "https://github.com/JochiRaider/URL_Research_Tool"
 # URL = "https://github.com/Bert-JanP/Hunting-Queries-Detection-Rules"
-# URL = "https://github.com/chinapandaman/PyPDFForm"
+URL = "https://github.com/chinapandaman/PyPDFForm"
 # URL = "https://github.com/SystemsApproach/book"
 REF: Optional[str] = None  # e.g. "main", "v1.0.0", or a commit SHA (only used for naming if spec.ref is None)
 

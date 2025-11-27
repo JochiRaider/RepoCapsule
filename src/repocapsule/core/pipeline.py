@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
-from typing import Optional, Iterable, Sequence, Dict, List, Tuple, Any, Callable
+from typing import Optional, Iterable, Sequence, Dict, List, Tuple, Any, Callable, Mapping
 from pathlib import Path
 import pickle
 
@@ -21,6 +21,9 @@ from .interfaces import (
     ClosableSource,
     RecordMiddleware,
     FileMiddleware,
+    RunContext,
+    RunLifecycleHook,
+    RunSummaryView,
 )
 from .concurrency import (
     Executor,
@@ -49,6 +52,9 @@ class _FuncRecordMiddleware:
 
     def process(self, record: Record) -> Optional[Record]:
         return self._fn(record)
+
+    def __call__(self, record: Record) -> Optional[Record]:
+        return self.process(record)
 
 
 class _FuncFileMiddleware:
@@ -118,6 +124,7 @@ class PipelineStats:
     source_errors: int = 0
     by_ext: Dict[str, int] = field(default_factory=dict)
     qc: QCSummaryTracker = field(default_factory=QCSummaryTracker)
+    primary_jsonl_path: str | None = None
 
     def as_dict(self) -> Dict[str, object]:
         """Return a stable dict shape for reporting and JSONL footers."""
@@ -135,6 +142,21 @@ class PipelineStats:
     def qc_top_dup_families(self) -> List[Dict[str, Any]]:
         """Return duplicate-family summary for reporting."""
         return self.qc.top_dup_families()
+
+    def to_summary_view(self, *, primary_jsonl_path: str | None = None) -> RunSummaryView:
+        """Return a lightweight summary view for hooks and reporting."""
+        if primary_jsonl_path is None:
+            primary_jsonl_path = self.primary_jsonl_path
+
+        qc_summary = self.qc.as_dict() if hasattr(self, "qc") and self.qc else None
+        return RunSummaryView(
+            num_records=int(self.records),
+            ext_counts=dict(self.by_ext),
+            qc_summary=qc_summary,
+            primary_jsonl_path=primary_jsonl_path,
+        )
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +265,7 @@ class PipelineEngine:
         self.config = plan.spec
         self.stats = PipelineStats()
         self.log = get_logger(__name__)
-        self._qc_hook_factory = getattr(plan.runtime, "qc_hook_factory", None)
-        self._qc_hooks: Optional[Tuple[Callable[[Record], bool], Callable[[Record], None]]] = None
+        self._hooks: Tuple[RunLifecycleHook, ...] = tuple(getattr(plan.runtime, "lifecycle_hooks", ()))
         self.before_record_hooks: List[Callable[[Record], Record]] = []
         self.after_record_hooks: List[Callable[[Record], Record]] = []
         self.record_filter_hooks: List[Callable[[Record], bool]] = []
@@ -252,7 +273,6 @@ class PipelineEngine:
         self.file_middlewares: List[FileMiddleware] = []
         self.before_source_hooks: List[Callable[[Source], None]] = []
         self.after_source_hooks: List[Callable[[Source], None]] = []
-        self._qc_middleware: Optional[RecordMiddleware] = None
         self._middlewares_normalized = False
 
     def add_record_middleware(self, middleware: RecordMiddleware | Callable[[Record], Any]) -> None:
@@ -278,69 +298,14 @@ class PipelineEngine:
 
         self._middlewares_normalized = True
 
-    def _prepare_qc(self) -> None:
-        """Configure QC tracker fields from pipeline configuration."""
-        cfg = self.config
-        stats = self.stats
-        qc_cfg = cfg.qc
-
-        tracker = stats.qc
-        mode_val = getattr(qc_cfg, "mode", None)
-        mode_lower = mode_val.lower() if isinstance(mode_val, str) else mode_val
-        inline_or_advisory = mode_lower in {"inline", "advisory"}
-        tracker.enabled = bool(qc_cfg.enabled) and inline_or_advisory
-        tracker.mode = mode_val
-        tracker.min_score = qc_cfg.min_score
-        tracker.drop_near_dups = bool(qc_cfg.drop_near_dups)
-
-    def _attach_qc_hooks(self) -> None:
-        """Add QC hooks to record middleware list when a factory is provided."""
-        if self._qc_hook_factory is None:
-            return
-        if self._qc_middleware is not None:
-            try:
-                self.record_middlewares.remove(self._qc_middleware)
-            except ValueError:
-                pass
-            self._qc_middleware = None
-        try:
-            filt, obs = self._qc_hook_factory(self.stats)
-        except Exception as exc:
-            self.log.warning("Failed to attach QC hooks: %s", exc)
-            self._qc_hooks = None
-            return
-
-        def _qc_middleware(record: Record) -> Optional[Record]:
-            try:
-                if not filt(record):
-                    return None
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning(
-                    "record_filter hook %s failed: %s",
-                    getattr(filt, "__name__", filt),
-                    exc,
-                )
-                return None
-            try:
-                return obs(record)
-            except Exception as exc:  # noqa: BLE001
-                self.log.warning(
-                    "after_record hook %s failed: %s",
-                    getattr(obs, "__name__", obs),
-                    exc,
-                )
-                return None
-
-        self.add_record_middleware(_qc_middleware)
-        self._qc_middleware = self.record_middlewares[-1]
-        self._qc_hooks = (filt, obs)
-
     def _apply_middlewares(self, record: Record) -> Optional[Record]:
         """Run a record through all registered record middlewares."""
         current = record
         for middleware in self.record_middlewares:
             try:
-                current = middleware.process(current)
+                process = getattr(middleware, "process", None)
+                callable_mw = process if callable(process) else middleware  # type: ignore[assignment]
+                current = callable_mw(current)
             except Exception as exc:  # noqa: BLE001
                 self.log.warning(
                     "record middleware %s failed: %s",
@@ -475,6 +440,24 @@ class PipelineEngine:
                         getattr(hook, "__name__", hook),
                         exc,
                     )
+
+            rec = record
+            for hook in self._hooks:
+                if rec is None:
+                    break
+                try:
+                    rec = hook.on_record(rec)
+                except Exception as exc:
+                    self.log.warning(
+                        "lifecycle hook %s failed on record: %s",
+                        getattr(hook, "__class__", type(hook)).__name__,
+                        exc,
+                    )
+                    rec = None
+                    break
+            if rec is None:
+                continue
+            record = rec
 
             wrote_any = False
             for sink in sinks:
@@ -696,50 +679,74 @@ class PipelineEngine:
         cfg = self.config
         self.stats = PipelineStats()
         stats = self.stats
-        self._prepare_qc()
-        self._attach_qc_hooks()
+
+        jsonl_path = cfg.sinks.primary_jsonl_name or cfg.metadata.primary_jsonl
+        stats.primary_jsonl_path = jsonl_path
         self._normalize_middlewares()
 
-        with ExitStack() as stack:
-            open_sources: List[Source] = [
-                _open_source_with_stack(stack, src) for src in self.plan.runtime.sources
-            ]
-            initial_ctx: Optional[RepoContext] = cfg.sinks.context
-            open_sinks: List[Sink] = _prepare_sinks(stack, self.plan.runtime.sinks, initial_ctx, stats)
-            if not open_sinks:
-                self.log.warning("No sinks are open; processed records will be dropped.")
+        start_ctx = RunContext(cfg=cfg, stats=stats, runtime=self.plan.runtime)
+        for hook in self._hooks:
+            try:
+                hook.on_run_start(start_ctx)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "lifecycle hook %s failed on run start: %s",
+                    getattr(hook, "__class__", type(hook)).__name__,
+                    exc,
+                )
 
-            executor, fail_fast = self._build_executor()
-            materialize_results = executor.cfg.kind == "process"
-            processor = self._make_processor(materialize=materialize_results)
-            source_items = self._iter_source_items(open_sources)
+        try:
+            with ExitStack() as stack:
+                open_sources: List[Source] = [
+                    _open_source_with_stack(stack, src) for src in self.plan.runtime.sources
+                ]
+                initial_ctx: Optional[RepoContext] = cfg.sinks.context
+                open_sinks: List[Sink] = _prepare_sinks(stack, self.plan.runtime.sinks, initial_ctx, stats)
+                if not open_sinks:
+                    self.log.warning("No sinks are open; processed records will be dropped.")
 
-            requested_kind = (cfg.pipeline.executor_kind or "auto").strip().lower()
-            resolved_kind = executor.cfg.kind
-            self.log.debug(
-                "Executor kind requested=%s resolved=%s max_workers=%d window=%d",
-                requested_kind,
-                resolved_kind,
-                executor.cfg.max_workers,
-                executor.cfg.window,
-            )
+                executor, fail_fast = self._build_executor()
+                materialize_results = executor.cfg.kind == "process"
+                processor = self._make_processor(materialize=materialize_results)
+                source_items = self._iter_source_items(open_sources)
 
-            if executor.cfg.max_workers <= 1:
-                for work in source_items:
-                    self._process_serial(
-                        work,
+                requested_kind = (cfg.pipeline.executor_kind or "auto").strip().lower()
+                resolved_kind = executor.cfg.kind
+                self.log.debug(
+                    "Executor kind requested=%s resolved=%s max_workers=%d window=%d",
+                    requested_kind,
+                    resolved_kind,
+                    executor.cfg.max_workers,
+                    executor.cfg.window,
+                )
+
+                if executor.cfg.max_workers <= 1:
+                    for work in source_items:
+                        self._process_serial(
+                            work,
+                            processor=processor,
+                            sinks=open_sinks,
+                            fail_fast=fail_fast,
+                        )
+                else:
+                    self._process_parallel(
+                        source_items,
                         processor=processor,
                         sinks=open_sinks,
+                        executor=executor,
                         fail_fast=fail_fast,
                     )
-            else:
-                self._process_parallel(
-                    source_items,
-                    processor=processor,
-                    sinks=open_sinks,
-                    executor=executor,
-                    fail_fast=fail_fast,
-                )
+        finally:
+            end_ctx = RunContext(cfg=cfg, stats=stats, runtime=self.plan.runtime)
+            for hook in self._hooks:
+                try:
+                    hook.on_run_end(end_ctx)
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning(
+                        "lifecycle hook %s failed on run end: %s",
+                        getattr(hook, "__class__", type(hook)).__name__,
+                        exc,
+                    )
 
         self._log_qc_summary()
         return stats

@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import json
 import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Mapping
 
 from ..log import get_logger
-from ..records import is_summary_record
-from ..config import QCHeuristics, DEFAULT_QC_SCORER_ID
+from ..config import QCConfig, QCHeuristics, DEFAULT_QC_SCORER_ID, RepocapsuleConfig, QCMode
+from ..qc_controller import QCSummaryTracker
+from ..qc_post import collect_qc_rows_from_jsonl, run_qc_over_jsonl
 from ..qc_utils import (
     TEXTY_LC,
     MinHashLSH,
@@ -35,7 +35,6 @@ from ..qc_utils import (
     repetition_rate,
     simhash64,
     target_band,
-    open_jsonl_maybe_gz,
 )
 
 __all__ = ["JSONLScoreStats", "JSONLQualityScorer", "score_jsonl_to_csv", "write_csv", "DefaultQualityScorerFactory"]
@@ -368,51 +367,41 @@ class JSONLQualityScorer:
         jsonl_path: str,
         *,
         fail_on_error: bool = False,
+        **kwargs: Any,
     ) -> list[Dict[str, Any]]:
-        """Score a JSONL file, including gzip-compressed *.jsonl.gz inputs.
-
-        Args:
-            jsonl_path (str): Path to the JSONL file.
-            fail_on_error (bool): Whether to raise on parse or scoring errors.
-
-        Returns:
-            list[dict[str, Any]]: QC result rows for each record.
-
-        Raises:
-            RuntimeError: If fail_on_error is True and parsing or scoring fails.
-        """
-        stats = JSONLScoreStats()
+        """Score a JSONL file by delegating to the shared QC driver."""
+        qc_cfg: QCConfig = kwargs.pop("qc_cfg", None) or QCConfig(
+            enabled=True,
+            write_csv=False,
+            fail_on_error=fail_on_error,
+            mode=QCMode.POST,
+        )
+        qc_cfg.fail_on_error = bool(fail_on_error)
+        config: RepocapsuleConfig = kwargs.pop("config", None) or RepocapsuleConfig(qc=qc_cfg)
+        tracker = QCSummaryTracker(
+            enabled=True,
+            mode=qc_cfg.mode,
+            min_score=qc_cfg.min_score,
+            drop_near_dups=bool(qc_cfg.drop_near_dups),
+        )
+        rows = collect_qc_rows_from_jsonl(
+            jsonl_path,
+            qc_cfg=qc_cfg,
+            config=config,
+            scorer=self,
+            runtime=None,
+            executor_hint=None,
+            tracker=tracker,
+        )
+        stats = JSONLScoreStats(
+            total_lines=tracker.scored + tracker.errors,
+            parsed_ok=tracker.scored,
+            scored_ok=tracker.scored,
+            parse_errors=tracker.errors,
+            score_errors=0,
+            error_examples=[],
+        )
         self.last_stats = stats
-        rows: list[Dict[str, Any]] = []
-        with open_jsonl_maybe_gz(jsonl_path) as f:
-            for line_no, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                stats.total_lines += 1
-                try:
-                    rec = json.loads(line)
-                except Exception as exc:
-                    stats.record_error(line_no, "parse", exc, line)
-                    if fail_on_error:
-                        raise RuntimeError(
-                            f"Failed to parse JSONL line {line_no} in {jsonl_path}: {exc}"
-                        ) from exc
-                    continue
-                stats.parsed_ok += 1
-                if is_summary_record(rec):
-                    continue
-                try:
-                    qc_row = self.score_record(rec)
-                except Exception as exc:
-                    stats.record_error(line_no, "score", exc, line)
-                    if fail_on_error:
-                        raise RuntimeError(
-                            f"QC scoring failed on line {line_no} in {jsonl_path}: {exc}"
-                        ) from exc
-                    continue
-                rows.append(qc_row)
-                stats.scored_ok += 1
         return rows
 
 
@@ -507,6 +496,14 @@ def score_jsonl_to_csv(
     """
     base, _ = os.path.splitext(jsonl_path)
     out_csv = out_csv or f"{base}_quality.csv"
+    qc_cfg = QCConfig(
+        enabled=True,
+        write_csv=True,
+        csv_suffix=out_csv,
+        mode=QCMode.POST,
+        fail_on_error=False,
+    )
+    config = RepocapsuleConfig(qc=qc_cfg)
     scorer = JSONLQualityScorer(
         lm_model_id=lm_model_id,
         device=device,
@@ -514,10 +511,26 @@ def score_jsonl_to_csv(
         simhash_hamm_thresh=simhash_hamm_thresh,
         local_files_only=local_files_only,
     )
-    rows = scorer.score_jsonl_path(jsonl_path, fail_on_error=False)
-    stats = scorer.last_stats
-    csv_path = write_csv(rows, out_csv)
-    if stats and (stats.parse_errors or stats.score_errors):
+    summary, _rows = run_qc_over_jsonl(
+        jsonl_path,
+        qc_cfg,
+        config=config,
+        scorer=scorer,
+        runtime=None,
+        executor_hint=None,
+        write_csv=True,
+        csv_suffix=out_csv,
+    )
+    stats = JSONLScoreStats(
+        total_lines=int(summary.get("scored", 0) or 0) + int(summary.get("errors", 0) or 0),
+        parsed_ok=int(summary.get("scored", 0) or 0),
+        scored_ok=int(summary.get("scored", 0) or 0),
+        parse_errors=int(summary.get("errors", 0) or 0),
+        score_errors=0,
+        error_examples=[],
+    )
+    scorer.last_stats = stats
+    if stats.parse_errors or stats.score_errors:
         log.warning(
             "QC: scored %d records from %d lines in %s (parse_errors=%d, score_errors=%d); some lines were skipped.",
             stats.scored_ok,
@@ -526,7 +539,7 @@ def score_jsonl_to_csv(
             stats.parse_errors,
             stats.score_errors,
         )
-    return csv_path
+    return out_csv
 
 
 class DefaultQualityScorerFactory:

@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from .config import RepocapsuleConfig
+from .interfaces import RunLifecycleHook, RunContext, RunSummaryView, RunArtifacts
 from .log import get_logger
-from .pipeline import PipelineStats
 from .qc_utils import open_jsonl_maybe_gz
 from .records import is_summary_record
 
@@ -22,6 +22,7 @@ __all__ = [
     "CARD_FRAGMENT_SCHEMA_VERSION",
     "CardFragment",
     "DatasetCardFields",
+    "DatasetCardHook",
     "build_card_fragment_for_run",
     "write_card_fragment_for_run",
     "load_card_fragment",
@@ -44,6 +45,33 @@ _SIZE_BUCKETS: list[tuple[int, str]] = [
 ]
 
 _LANG_META_KEYS = ("language", "lang")
+
+
+class DatasetCardHook(RunLifecycleHook):
+    """Lifecycle hook that writes a dataset card fragment at run end."""
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+
+    def on_run_start(self, ctx: RunContext) -> None:  # pragma: no cover - no-op
+        return None
+
+    def on_record(self, record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        return record
+
+    def on_run_end(self, ctx: RunContext) -> None:
+        # No-op: dataset card writing now happens in on_artifacts so that
+        # it uses the same RunArtifacts bundle as sinks.
+        return None
+
+    def on_artifacts(self, artifacts: RunArtifacts, ctx: RunContext) -> None:
+        if not self.enabled:
+            return
+        try:
+            summary_view = artifacts.summary_view
+            write_card_fragment_for_run(ctx.cfg, summary_view)
+        except Exception:
+            log.exception("Failed to write dataset card fragment")
 
 
 def _package_version() -> str:
@@ -308,13 +336,25 @@ def _derive_tags_from_stats(stats: Mapping[str, Any]) -> list[str] | None:
 
 def build_card_fragment_for_run(
     cfg: RepocapsuleConfig,
-    stats: PipelineStats | Mapping[str, Any],
+    stats: Any,
     *,
     split: str | None = None,
 ) -> CardFragment:
     """Build a fragment describing one processed JSONL output file."""
-    stats_dict = stats.as_dict() if isinstance(stats, PipelineStats) else dict(stats)
-    jsonl_path_str = cfg.metadata.primary_jsonl or cfg.sinks.primary_jsonl_name
+    primary_jsonl_override: str | None = None
+    if isinstance(stats, RunSummaryView) or is_dataclass(stats):
+        stats_dict = asdict(stats)
+        primary_jsonl_override = stats_dict.get("primary_jsonl_path")
+    else:
+        as_dict_fn = getattr(stats, "as_dict", None)
+        if callable(as_dict_fn):
+            stats_dict = as_dict_fn()
+        else:
+            stats_dict = dict(stats)
+    if primary_jsonl_override is None:
+        primary_jsonl_override = stats_dict.get("primary_jsonl_path")
+
+    jsonl_path_str = primary_jsonl_override or cfg.metadata.primary_jsonl or cfg.sinks.primary_jsonl_name
     if not jsonl_path_str:
         raise ValueError("cfg.metadata.primary_jsonl is required to build a card fragment.")
     jsonl_path = Path(jsonl_path_str)
@@ -329,6 +369,7 @@ def build_card_fragment_for_run(
         stats_dict.get("records_out")
         or stats_dict.get("records")
         or stats_dict.get("records_written")
+        or stats_dict.get("num_records")
         or 0
     )
 
@@ -350,6 +391,8 @@ def build_card_fragment_for_run(
     source_repos = _merge_str_lists(
         getattr(cfg.metadata, "repo_url", None),
         getattr(cfg.sinks.context, "repo_url", None) if getattr(cfg, "sinks", None) else None,
+        getattr(cfg.metadata, "repo_full_name", None),
+        getattr(cfg.sinks.context, "repo_full_name", None) if getattr(cfg, "sinks", None) else None,
     )
 
     extra: dict[str, Any] = {

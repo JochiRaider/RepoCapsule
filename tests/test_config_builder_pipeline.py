@@ -28,6 +28,7 @@ from repocapsule.core.pipeline import PipelineEngine, run_pipeline
 from repocapsule.core.safe_http import SafeHttpClient
 from repocapsule.core.registries import SourceRegistry, SinkRegistry
 from repocapsule.core.factories import SinkFactoryResult
+from repocapsule.core.qc_controller import InlineQCHook
 import repocapsule.core.pipeline as pipeline
 
 
@@ -314,7 +315,7 @@ def test_pipeline_overrides_qc_scorer(tmp_path: Path):
 
     plan = build_pipeline_plan(cfg, mutate=False, overrides=overrides)
 
-    assert plan.runtime.qc_hook_factory is not None
+    assert any(isinstance(h, InlineQCHook) for h in plan.runtime.lifecycle_hooks)
     assert plan.spec.qc.scorer is None
     assert plan.runtime.qc_scorer_for_csv is None
 
@@ -459,9 +460,11 @@ def test_process_parallel_submit_error_increments_errors(caplog):
         sinks=(),
         file_extractor=cfg.pipeline.file_extractor or PipelineConfig().file_extractor or pipeline.DefaultExtractor(),
         bytes_handlers=(),
-        qc_hook_factory=None,
+        lifecycle_hooks=(),
         executor_config=None,
         fail_fast=False,
+        qc_scorer_for_csv=None,
+        post_qc_scorer=None,
     )
     plan = PipelinePlan(spec=cfg, runtime=runtime)
     engine = PipelineEngine(plan)

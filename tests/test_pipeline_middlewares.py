@@ -94,27 +94,32 @@ def test_normalize_middlewares_wraps_bare_functions(tmp_path: Path):
 
 def test_qc_hook_attaches_record_middleware(tmp_path: Path):
     engine = _make_basic_plan(tmp_path)
-    cfg = engine.config
-    cfg.qc.enabled = True
-    cfg.qc.mode = "inline"
 
-    def filt(record):
-        return True
+    class TagHook:
+        def __init__(self) -> None:
+            self.started = False
+            self.finished = False
 
-    def obs(record):
-        meta = record.setdefault("meta", {})
-        meta["qc_tag"] = True
-        return record
+        def on_run_start(self, ctx):
+            self.started = True
 
-    engine.plan.runtime.qc_hook_factory = lambda stats: (filt, obs)
-    engine._qc_hook_factory = engine.plan.runtime.qc_hook_factory
+        def on_record(self, record):
+            meta = record.setdefault("meta", {})
+            meta["qc_tag"] = True
+            return record
+
+        def on_run_end(self, ctx):
+            self.finished = True
+
+    hook = TagHook()
+    engine.plan.runtime.lifecycle_hooks = (hook,)
 
     stats = engine.run()
     payloads = _read_payloads(engine)
 
     assert stats.records == 1
+    assert hook.started and hook.finished
     assert any(rec.get("meta", {}).get("qc_tag") is True for rec in payloads)
-    assert any(isinstance(mw, _FuncRecordMiddleware) for mw in engine.record_middlewares)
 
 
 def test_sink_open_failure_increments_stats(tmp_path: Path):
@@ -130,17 +135,7 @@ def test_sink_open_failure_increments_stats(tmp_path: Path):
         def close(self):
             return None
 
-    engine.plan.runtime = engine.plan.runtime.__class__(
-        http_client=engine.plan.runtime.http_client,
-        sources=engine.plan.runtime.sources,
-        sinks=(FailingSink(),),
-        file_extractor=engine.plan.runtime.file_extractor,
-        bytes_handlers=engine.plan.runtime.bytes_handlers,
-        qc_hook_factory=engine.plan.runtime.qc_hook_factory,
-        executor_config=engine.plan.runtime.executor_config,
-        fail_fast=engine.plan.runtime.fail_fast,
-        qc_scorer_for_csv=getattr(engine.plan.runtime, "qc_scorer_for_csv", None),
-    )
+    engine.plan.runtime.sinks = (FailingSink(),)
 
     stats = engine.run()
 

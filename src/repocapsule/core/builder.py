@@ -24,6 +24,7 @@ from .interfaces import (
     SourceFactoryContext,
     SinkFactoryContext,
     QualityScorer,
+    RunLifecycleHook,
 )
 from .safe_http import SafeHttpClient
 from .log import get_logger
@@ -31,18 +32,18 @@ from .factories import make_bytes_handlers, make_qc_scorer
 from .convert import DefaultExtractor
 from .chunk import ChunkPolicy
 from .records import build_run_header_record
+from .hooks import RunSummaryHook
+from .dataset_card import DatasetCardHook
 from .registries import (
     SourceRegistry,
     SinkRegistry,
     BytesHandlerRegistry,
     QualityScorerRegistry,
-    bytes_handler_registry,
-    quality_scorer_registry,
-    default_source_registry,
-    default_sink_registry,
+    RegistryBundle,
+    default_registries,
 )
-from .qc_controller import InlineQCController
-from .plugins import load_entrypoint_plugins
+from .qc_controller import InlineQCController, InlineQCHook
+from .qc_post import PostQCHook
 from .concurrency import resolve_pipeline_executor_config
 
 log = get_logger(__name__)
@@ -101,10 +102,8 @@ class PipelineRuntime:
             chunk files that are not handled by bytes handlers.
         bytes_handlers (Sequence[tuple[Sniff, BytesHandler]]): Ordered
             (sniff, handler) pairs used for binary formats.
-        qc_hook_factory (Callable[[Any], tuple[Callable[[Record], bool],
-            Callable[[Record], Record]]] | None): Factory that builds
-            inline QC hooks given a stats object, or None when QC is
-            disabled or uses post-hoc mode.
+        lifecycle_hooks (Sequence[RunLifecycleHook]): Hooks invoked at
+            run start/end and per record.
         executor_config (Any | None): Executor configuration determined
             by resolve_pipeline_executor_config().
         fail_fast (bool): Whether worker failures should abort the run.
@@ -119,7 +118,7 @@ class PipelineRuntime:
     sinks: Sequence[Sink]
     file_extractor: FileExtractor
     bytes_handlers: Sequence[Tuple[Sniff, BytesHandler]]
-    qc_hook_factory: Callable[[Any], tuple[Callable[[Record], bool], Callable[[Record], Record]]] | None = None
+    lifecycle_hooks: Sequence[RunLifecycleHook] = ()
     executor_config: Any | None = None
     fail_fast: bool = False
     qc_scorer_for_csv: QualityScorer | None = None
@@ -164,17 +163,15 @@ class QCPreparationResult:
     Attributes:
         qc_cfg (QCConfig): Normalized QC configuration with runtime-only
             fields cleared.
-        qc_hook_factory (Callable[[Any], tuple[Callable[[Record], bool],
-            Callable[[Record], Record]]] | None): Factory that builds
-            inline QC hooks given a stats object, or None when QC is
-            disabled or running in post mode.
+        hooks (tuple[RunLifecycleHook, ...]): Lifecycle hooks used to
+            execute inline/advisory or post-hoc QC.
         scorer_for_csv (QualityScorer | None): Scorer to use when
             emitting QC CSV reports.
         post_qc_scorer (QualityScorer | None): Scorer to use for
             post-hoc QC runs when mode is QCMode.POST.
     """
     qc_cfg: QCConfig
-    qc_hook_factory: Callable[[Any], tuple[Callable[[Record], bool], Callable[[Record], Record]]] | None
+    hooks: tuple[RunLifecycleHook, ...]
     scorer_for_csv: QualityScorer | None
     post_qc_scorer: QualityScorer | None
 
@@ -205,6 +202,7 @@ def build_pipeline_plan(
     *,
     mutate: bool = False,
     overrides: PipelineOverrides | None = None,
+    registries: RegistryBundle | None = None,
     source_registry: Optional[SourceRegistry] = None,
     sink_registry: Optional[SinkRegistry] = None,
     bytes_registry: Optional[BytesHandlerRegistry] = None,
@@ -213,7 +211,7 @@ def build_pipeline_plan(
 ) -> PipelinePlan:
     """Build a PipelinePlan from a declarative RepocapsuleConfig.
 
-    The builder validates the configuration, loads plugins, constructs
+    The builder validates the configuration, optionally loads plugins,
     sources and sinks, attaches run-header records, resolves QC and
     executor wiring, and separates runtime objects into a
     PipelineRuntime.
@@ -226,17 +224,28 @@ def build_pipeline_plan(
             reusable.
         overrides (PipelineOverrides | None): Runtime-only overrides for
             HTTP client, QC scorer, file extractor, or bytes handlers.
-        source_registry (SourceRegistry | None): Registry used to build
-            sources. Defaults to :func:`default_source_registry`.
-        sink_registry (SinkRegistry | None): Registry used to build
-            sinks.
-        bytes_registry (BytesHandlerRegistry | None): Registry used to
-            build bytes handlers.
-        scorer_registry (QualityScorerRegistry | None): Registry used to
-            build QC scorers. When None, a new registry instance is
-            used.
-        load_plugins (bool): Whether to load entry-point plugins before
-            building registries.
+        registries (RegistryBundle | None): Bundle of registries for
+            sources, sinks, bytes handlers, and QC scorers. When
+            omitted, :func:`default_registries` is used with
+            ``load_plugins``.
+        source_registry (SourceRegistry | None): Registry override used
+            to build sources. Overrides ``registries.sources`` when
+            provided.
+        sink_registry (SinkRegistry | None): Registry override used to
+            build sinks. Overrides ``registries.sinks`` when provided.
+        bytes_registry (BytesHandlerRegistry | None): Registry override
+            used to build bytes handlers. Overrides ``registries.bytes``
+            when provided.
+        scorer_registry (QualityScorerRegistry | None): Registry
+            override used to build QC scorers. Overrides
+            ``registries.scorers`` when provided.
+        load_plugins (bool): Whether to load entry-point plugins into
+            the default registries when ``registries`` is omitted. This
+            flag is ignored when explicit registries are supplied.
+
+    Per-registry overrides win over entries in ``registries`` and are
+    retained for backward compatibility; callers may migrate to passing
+    a bundle instead.
 
     Returns:
         PipelinePlan: Immutable plan containing the validated spec and
@@ -253,17 +262,11 @@ def build_pipeline_plan(
     cfg = config if mutate else deepcopy(config)
     _assert_runtime_free_spec(cfg)
     cfg.logging.apply()
-    source_registry = source_registry or default_source_registry()
-    sink_registry = sink_registry or default_sink_registry()
-    bytes_registry = bytes_registry or bytes_handler_registry
-    scorer_registry = scorer_registry or QualityScorerRegistry()
-    if load_plugins:
-        load_entrypoint_plugins(
-            source_registry=source_registry,
-            sink_registry=sink_registry,
-            bytes_registry=bytes_registry,
-            scorer_registry=scorer_registry,
-        )
+    bundle = registries or default_registries(load_plugins=load_plugins)
+    source_registry = source_registry or bundle.sources
+    sink_registry = sink_registry or bundle.sinks
+    bytes_registry = bytes_registry or bundle.bytes
+    scorer_registry = scorer_registry or bundle.scorers
     http_client = _prepare_http(cfg, overrides=overrides)
     source_ctx = SourceFactoryContext(
         repo_context=cfg.sinks.context,
@@ -282,6 +285,13 @@ def build_pipeline_plan(
     _attach_run_header_record(cfg, sinks_res.sinks)
     cfg.validate()
 
+    lifecycle_hooks: list[RunLifecycleHook] = list(qc_res.hooks)
+    primary_jsonl_path = cfg.sinks.primary_jsonl_name or cfg.metadata.primary_jsonl
+    lifecycle_hooks.append(RunSummaryHook())
+    dc_cfg = getattr(cfg, "dataset_card", None)
+    if dc_cfg is None or getattr(dc_cfg, "enabled", True):
+        lifecycle_hooks.append(DatasetCardHook(enabled=True))
+
     bytes_handlers = pipe_res.bytes_handlers
     file_extractor = pipe_res.file_extractor
     temp_runtime = PipelineRuntime(
@@ -290,7 +300,7 @@ def build_pipeline_plan(
         sinks=sinks_res.sinks,
         file_extractor=file_extractor,
         bytes_handlers=bytes_handlers,
-        qc_hook_factory=qc_res.qc_hook_factory,
+        lifecycle_hooks=tuple(lifecycle_hooks),
         qc_scorer_for_csv=qc_res.scorer_for_csv,
         post_qc_scorer=qc_res.post_qc_scorer,
     )
@@ -498,10 +508,14 @@ def _prepare_qc(
     Raises:
         RuntimeError: If inline or advisory QC is requested but QC
             extras are not installed and no scorer override is provided.
+
+    Inline/advisory QC calls the scorer only via ``score_record``; JSONL
+    handling and CSV/post-QC execution are centralized in ``qc_post`` so
+    scorer implementations do not need file-level helpers.
     """
     qc_cfg = cfg.qc
     mode = qc_cfg.normalize_mode()
-    qc_hook_factory: Callable[[Any], tuple[Callable[[Record], bool], Callable[[Record], Record]]] | None = None
+    hooks: list[RunLifecycleHook] = []
     scorer_for_csv: QualityScorer | None = None
     post_qc_scorer: QualityScorer | None = None
 
@@ -509,12 +523,9 @@ def _prepare_qc(
         qc_cfg.enabled = False
         qc_cfg.mode = QCMode.OFF
         qc_cfg.scorer = None
-        return QCPreparationResult(qc_cfg=qc_cfg, qc_hook_factory=None, scorer_for_csv=None, post_qc_scorer=None)
+        return QCPreparationResult(qc_cfg=qc_cfg, hooks=tuple(), scorer_for_csv=None, post_qc_scorer=None)
 
-    if overrides and overrides.qc_scorer is not None:
-        qc_scorer = overrides.qc_scorer
-    else:
-        qc_scorer = None
+    qc_scorer = overrides.qc_scorer if overrides and overrides.qc_scorer is not None else None
 
     if mode in {QCMode.INLINE, QCMode.ADVISORY}:
         if qc_scorer is None:
@@ -524,23 +535,26 @@ def _prepare_qc(
                     "Inline/advisory QC requested but QC extras are not installed; disable qc.enabled or install QC dependencies."
                 )
         enforce_drops = mode == QCMode.INLINE
-
-        def qc_hook_factory(stats: Any) -> tuple[Callable[[Record], bool], Callable[[Record], Record]]:
-            controller = InlineQCController(
-                config=qc_cfg,
-                stats=stats,
-                scorer=qc_scorer,  # type: ignore[arg-type]
-                logger=log,
-                enforce_drops=enforce_drops,
+        controller = InlineQCController(
+            config=qc_cfg,
+            stats=None,
+            scorer=qc_scorer,  # type: ignore[arg-type]
+            logger=log,
+            enforce_drops=enforce_drops,
+        )
+        hooks.append(
+            InlineQCHook(
+                controller,
+                write_csv=bool(qc_cfg.write_csv),
+                csv_suffix=qc_cfg.csv_suffix,
             )
-            return controller.accept, controller.on_record
-
+        )
         if qc_cfg.write_csv:
             scorer_for_csv = qc_scorer
         qc_cfg.scorer = None
         return QCPreparationResult(
             qc_cfg=qc_cfg,
-            qc_hook_factory=qc_hook_factory,
+            hooks=tuple(hooks),
             scorer_for_csv=scorer_for_csv,
             post_qc_scorer=None,
         )
@@ -551,10 +565,12 @@ def _prepare_qc(
             log.warning("QC POST mode enabled but QC extras are not installed; skipping QC for this run.")
             qc_cfg.enabled = False
             qc_cfg.mode = QCMode.OFF
+        else:
+            hooks.append(PostQCHook(qc_cfg, post_qc_scorer))
         qc_cfg.scorer = None
     return QCPreparationResult(
         qc_cfg=qc_cfg,
-        qc_hook_factory=qc_hook_factory,
+        hooks=tuple(hooks),
         scorer_for_csv=scorer_for_csv,
         post_qc_scorer=post_qc_scorer,
     )

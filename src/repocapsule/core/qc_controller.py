@@ -3,13 +3,17 @@
 """Helpers for inline QC execution and summary building."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .config import QCMode
-from .interfaces import QualityScorer, Record
+from .interfaces import QualityScorer, Record, RunLifecycleHook, RunContext, RunArtifacts
+from .log import get_logger
 from .records import ensure_meta_dict, merge_meta_defaults, best_effort_record_path, filter_qc_meta
 from .qc_utils import update_dup_family_counts, top_dup_families
+
+log = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -151,7 +155,7 @@ class InlineQCController:
         self,
         *,
         config,
-        stats,
+        stats=None,
         scorer: QualityScorer,
         logger,
         enforce_drops: bool = True,
@@ -170,15 +174,31 @@ class InlineQCController:
         self.scorer = scorer
         self.logger = logger
         self.enforce_drops = enforce_drops
-        tracker = getattr(stats, "qc", None)
-        if not isinstance(tracker, QCSummaryTracker):
-            tracker = QCSummaryTracker()
-            stats.qc = tracker  # type: ignore[attr-defined]
-        tracker.enabled = True
-        tracker.mode = config.mode
-        tracker.min_score = config.min_score
-        tracker.drop_near_dups = bool(config.drop_near_dups)
+        self.summary = QCSummaryTracker()
+        self.reset(stats)
+
+    @property
+    def tracker(self) -> QCSummaryTracker:
+        return self.summary
+
+    def reset(self, stats: Any | None = None) -> None:
+        """Reset internal tracker state and reattach to stats when provided."""
+
+        if stats is not None:
+            self.stats = stats
+        tracker = QCSummaryTracker(
+            enabled=True,
+            mode=self.cfg.mode,
+            min_score=self.cfg.min_score,
+            drop_near_dups=bool(self.cfg.drop_near_dups),
+        )
         self.summary = tracker
+        target_stats = self.stats
+        if target_stats is not None:
+            try:
+                target_stats.qc = tracker  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     def accept(self, record: Record) -> bool:
         """Score a record and apply QC gating rules.
@@ -189,6 +209,16 @@ class InlineQCController:
         Returns:
             bool: True if the record passes QC and should be kept.
         """
+        return self.process_record(record) is not None
+
+    def on_record(self, record: Record) -> Record:
+        """No-op observer hook; returns the record unchanged."""
+        # Inline QC performs all work inside accept(); observer hook is a pass-through.
+        return record
+
+    def process_record(self, record: Record) -> Record | None:
+        """Score and optionally drop a record, merging QC metadata when kept."""
+
         try:
             qc_result = self.scorer.score_record(record)
         except Exception as exc:
@@ -203,32 +233,30 @@ class InlineQCController:
                     getattr(self.cfg, "mode", None),
                     exc,
                 )
-            return True
+            return None if self.enforce_drops else self._mark_qc_error(record)
 
-        keep = self.summary.observe(qc_result, apply_gates=self.enforce_drops)
-        self._merge_qc_meta(record, qc_result)
-        return keep
-
-    def on_record(self, record: Record) -> Record:
-        """No-op observer hook; returns the record unchanged."""
-        # Inline QC performs all work inside accept(); observer hook is a pass-through.
+        try:
+            keep = self.summary.observe(qc_result, apply_gates=self.enforce_drops)
+            self._merge_qc_meta_impl(record, qc_result)
+        except Exception as exc:
+            self.summary.record_error()
+            if getattr(self.cfg, "fail_on_error", False):
+                raise
+            if self.logger:
+                path = best_effort_record_path(record)
+                self.logger.warning("QC post-processing failed for %s: %s", path, exc)
+            return None if self.enforce_drops else self._mark_qc_error(record)
+        if not keep:
+            return None
         return record
 
     def summary_dict(self) -> Dict[str, Any]:
         """Return the current QC summary as a dictionary."""
         return self.summary.as_dict()
 
-    def _merge_qc_meta(self, record: Record, qc_result: Dict[str, Any]) -> None:
-        """Attach QC-derived metadata to the record meta dictionary.
+    def _merge_qc_meta_impl(self, record: Record, qc_result: Dict[str, Any]) -> None:
+        """Attach QC-derived metadata to the record meta dictionary."""
 
-        Populates approximate token counts, merges canonical QC fields, and
-        stores additional QC signals under meta["extra"]["qc_signals"] without
-        clobbering existing entries.
-
-        Args:
-            record (Record): Record whose meta will be updated.
-            qc_result (dict[str, Any]): QC result data for the record.
-        """
         if not isinstance(record, dict):
             return
         meta = ensure_meta_dict(record)
@@ -250,6 +278,108 @@ class InlineQCController:
             if key in qc_extra:
                 continue
             qc_extra[key] = value
+
+    def _mark_qc_error(self, record: Record) -> Record:
+        """Annotate a record when QC processing fails but we keep the record."""
+        if isinstance(record, dict):
+            meta = ensure_meta_dict(record)
+            meta["qc_error"] = True
+        return record
+
+
+class InlineQCHook(RunLifecycleHook):
+    """Lifecycle hook that applies inline QC gating and summaries."""
+
+    def __init__(self, controller: InlineQCController, *, write_csv: bool = False, csv_suffix: str | None = None) -> None:
+        self._controller = controller
+        self._write_csv = write_csv
+        self._csv_suffix = csv_suffix
+
+    def on_run_start(self, ctx: RunContext) -> None:
+        self._controller.reset(ctx.stats)
+
+    def on_record(self, record: Record) -> Record | None:
+        try:
+            return self._controller.process_record(record)
+        except Exception:
+            self._controller.tracker.record_error()
+            log.warning("Inline QC hook failed", exc_info=True)
+            if self._controller.enforce_drops:
+                return None
+            return self._controller._mark_qc_error(record)
+
+    def on_run_end(self, ctx: RunContext) -> None:
+        ctx.stats.qc = self._controller.tracker
+        if not self._write_csv:
+            return
+        try:
+            self._write_csv_report(ctx)
+        except Exception:  # pragma: no cover - best-effort logging
+            log.warning("Failed to write inline QC CSV", exc_info=True)
+
+    def on_artifacts(self, artifacts: RunArtifacts, ctx: RunContext) -> None:
+        # Inline QC doesn't need run-level artifacts; all work is handled via
+        # per-record processing and run-end summary propagation.
+        return None
+
+    def _write_csv_report(self, ctx: RunContext) -> None:
+        jsonl_path = ctx.cfg.sinks.primary_jsonl_name or ctx.cfg.metadata.primary_jsonl
+        if not jsonl_path:
+            return
+        out_csv = _derive_csv_path(jsonl_path, self._csv_suffix)
+        if not out_csv:
+            return
+        scorer = getattr(self._controller, "scorer", None)
+        if scorer is None:
+            return
+
+        reset = getattr(scorer, "reset_state", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                log.debug("QC scorer reset_state failed; continuing", exc_info=True)
+
+        tracker = QCSummaryTracker(
+            enabled=True,
+            mode=self._controller.cfg.mode,
+            min_score=self._controller.cfg.min_score,
+            drop_near_dups=bool(self._controller.cfg.drop_near_dups),
+        )
+        from .qc_post import collect_qc_rows_from_jsonl, emit_qc_csv
+
+        rows = collect_qc_rows_from_jsonl(
+            str(jsonl_path),
+            qc_cfg=self._controller.cfg,
+            config=ctx.cfg,
+            scorer=scorer,
+            runtime=getattr(ctx, "runtime", None),
+            executor_hint=None,
+            tracker=tracker,
+        )
+        emit_qc_csv(rows, str(jsonl_path), out_csv)
+
+        err_count = tracker.errors
+        if err_count and hasattr(ctx, "stats"):
+            try:
+                ctx.stats.qc.errors += err_count  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            log.warning("Inline QC CSV scoring for %s skipped %s lines", jsonl_path, err_count)
+
+
+def _derive_csv_path(jsonl_path: Optional[str], suffix: Optional[str]) -> Optional[str]:
+    """Derive a QC CSV path from a primary JSONL path and suffix."""
+
+    if not jsonl_path:
+        return None
+    if suffix and ((os.sep and os.sep in suffix) or (os.altsep and os.altsep in suffix)):
+        return suffix
+    suffix = suffix or "_quality.csv"
+    base = str(jsonl_path)
+    if base.endswith(".jsonl"):
+        base = base[:-6]
+    return base + suffix
 
 
 def summarize_qc_rows(

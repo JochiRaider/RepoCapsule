@@ -150,7 +150,7 @@ from .core.convert import (
     make_records_for_file,
     make_records_from_bytes,
 )
-from .core.interfaces import FileExtractor, FileItem, RepoContext, Source, Sink, Extractor
+from .core.interfaces import FileExtractor, FileItem, RepoContext, Source, Sink, Extractor, RunLifecycleHook, RunContext
 from .core.pipeline import run_pipeline, PipelineStats, PipelineEngine
 from .cli.runner import run_engine
 from .core.factories import make_web_pdf_source
