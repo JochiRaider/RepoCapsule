@@ -115,8 +115,18 @@ class SQLiteSource(Source):
             return self.db_path
         raise FileNotFoundError(self.db_path)
 
+    def _quote_identifier(self, name: Optional[str]) -> Optional[str]:
+        """Quotes SQLite identifiers to avoid conflicts with reserved keywords."""
+        if not name:
+            return name
+        escaped = name.replace('"', '""')
+        return f'"{escaped}"'
+
     def _build_query(self) -> Tuple[str, Optional[str]]:
-        """Constructs the SQL query and a label for result paths."""
+        """Constructs the SQL query and a label for result paths.
+
+        Note: The WHERE clause is used verbatim and must come from trusted input.
+        """
         if self.sql:
             return self.sql, "query"
         if self.table:
@@ -125,9 +135,12 @@ class SQLiteSource(Source):
                 cols = [self.id_column, *cols]
             if not cols:
                 raise ValueError("text_columns must be provided for SQLite table mode")
-            select_cols = ", ".join(cols)
-            sql = f"SELECT {select_cols} FROM {self.table}"
+            safe_cols = [self._quote_identifier(col) or col for col in cols]
+            safe_table = self._quote_identifier(self.table) or self.table
+            select_cols = ", ".join(safe_cols)
+            sql = f"SELECT {select_cols} FROM {safe_table}"
             if self.where:
+                # WHERE remains raw SQL to preserve caller flexibility; callers must sanitize.
                 sql = f"{sql} WHERE {self.where}"
             return sql, self.table
         raise ValueError("Either sql or table must be provided for SQLiteSource")

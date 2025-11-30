@@ -1,3 +1,5 @@
+import pytest
+
 from repocapsule.core.config import SourceSpec
 from repocapsule.core.factories_sources import (
     CsvTextSourceFactory,
@@ -96,13 +98,12 @@ def test_web_page_pdf_overlays_pdf_config_from_options():
     assert source.retries == 6
 
 
-def test_unknown_options_do_not_override_defaults():
+def test_unknown_options_rejected():
     ctx = _make_ctx({"local_dir": {"skip_hidden": False}})
     spec = SourceSpec(kind="local_dir", options={"root_dir": ".", "unknown": "value"})
 
-    source = LocalDirSourceFactory().build(ctx, spec)[0]
-
-    assert source._cfg.skip_hidden is False
+    with pytest.raises(ValueError):
+        LocalDirSourceFactory().build(ctx, spec)
 
 
 def test_sqlite_factory_applies_option_overrides():
