@@ -14,6 +14,8 @@ from ..core.config import RepocapsuleConfig, load_config_from_path
 from ..core.dataset_card import build_dataset_card_from_fragments
 from ..core.log import configure_logging
 from ..core.qc_post import _run_post_qc
+from ..core.sharding import SHARDING_STRATEGIES, generate_shard_configs
+from ..core.stats_aggregate import merge_pipeline_stats
 from .runner import (
     convert,
     convert_local_dir,
@@ -84,6 +86,22 @@ def _build_parser() -> argparse.ArgumentParser:
     qc_p.add_argument("--parallel", action="store_true", help="Enable parallel QC if extras allow.")
     qc_p.add_argument("--config", help="Optional config to reuse QC settings.")
 
+    shard_p = subparsers.add_parser("shard", help="Generate sharded configs.")
+    shard_p.add_argument("--targets", required=True, type=Path, help="File of targets.")
+    shard_p.add_argument("--base", required=True, type=Path, help="Base config TOML/JSON.")
+    shard_p.add_argument("--shards", required=True, type=int, help="Number of shards.")
+    shard_p.add_argument("--out-dir", required=True, type=Path, help="Output directory for shard configs.")
+    shard_p.add_argument(
+        "--kind",
+        required=True,
+        choices=sorted(SHARDING_STRATEGIES),
+        help="Source kind to shard.",
+    )
+
+    merge_p = subparsers.add_parser("merge-stats", help="Merge stats JSON files.")
+    merge_p.add_argument("stats_files", nargs="+", type=Path, help="Paths to stats JSON files.")
+    merge_p.add_argument("--output", "-o", type=Path, help="Output file (defaults to stdout).")
+
     return parser
 
 
@@ -122,6 +140,44 @@ def _load_base_config(path: Optional[str]) -> Optional[RepocapsuleConfig]:
     if not path:
         return None
     return load_config_from_path(path)
+
+
+def _cmd_shard(args: argparse.Namespace) -> int:
+    """Generate sharded configs from a base config and targets list."""
+    cfg = load_config_from_path(args.base)
+    raw_lines = args.targets.read_text("utf-8").splitlines()
+    targets = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("#")]
+
+    out_dir: Path = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if any(out_dir.iterdir()):
+        raise SystemExit(f"Refusing to write shard configs into non-empty {out_dir}")
+
+    for shard_id, shard_cfg in generate_shard_configs(
+        input_list=targets,
+        base_config=cfg,
+        num_shards=args.shards,
+        source_kind=args.kind,
+    ):
+        out_path = out_dir / f"shard_{shard_id}.json"
+        out_path.write_text(json.dumps(shard_cfg.to_dict(), indent=2) + "\n", encoding="utf-8")
+    return 0
+
+
+def _cmd_merge_stats(args: argparse.Namespace) -> int:
+    """Merge stats JSON files and write to stdout or a file."""
+    stats_dicts = []
+    for path in args.stats_files:
+        data = json.loads(path.read_text("utf-8"))
+        stats_dicts.append(data)
+
+    merged = merge_pipeline_stats(stats_dicts)
+    text = json.dumps(merged, indent=2, sort_keys=True)
+    if args.output:
+        args.output.write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
 
 
 def _dispatch(args: argparse.Namespace) -> int:
@@ -210,6 +266,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             score_jsonl_to_csv(str(jsonl_path), str(args.csv))
         print(json.dumps(summary, indent=2))
         return 0
+
+    if cmd == "shard":
+        return _cmd_shard(args)
+
+    if cmd == "merge-stats":
+        return _cmd_merge_stats(args)
 
     print(f"Unknown command: {cmd}", file=sys.stderr)
     return 1

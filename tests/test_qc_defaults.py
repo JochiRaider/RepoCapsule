@@ -97,7 +97,6 @@ def test_parallel_qc_without_clone_uses_factory(monkeypatch, tmp_path: Path):
     def fake_make_qc_scorer(qc_cfg, new_instance=False, scorer_registry=None):
         return DummyScorer()
 
-    monkeypatch.setattr(runner, "make_qc_scorer", fake_make_qc_scorer)
     monkeypatch.setattr(builder, "make_qc_scorer", fake_make_qc_scorer)
 
     plan = build_pipeline_plan(cfg, mutate=False)

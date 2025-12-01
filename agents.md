@@ -71,6 +71,7 @@ These hold the main invariants and are more sensitive to changes:
 - `core/qc_utils.py`, `core/qc_controller.py`, `core/qc_post.py` – QC utilities, inline QC controller, post-hoc QC driver.
 - `dataset_card.py` – dataset card fragments and rendering.
 - `safe_http.py` – stdlib-only HTTP client with IP/redirect safeguards.
+- `core/sharding.py`, `core/stats_aggregate.py` – sharded-run helpers (config splitting, stats merging).
 
 When in doubt, prefer changing **non-core** code and wiring via registries/factories rather than patching these core modules.
 
@@ -148,6 +149,12 @@ Per-kind defaults and per-spec options should converge into small dataclasses be
 1. Update `dataset_card.py` fragments/merging logic (see `llms.md` §3.1 dataset card).
 2. Ensure pipeline stats feed any new signals into card fragments.
 3. Keep output compatible with HF dataset card conventions (YAML front matter + Markdown).
+
+### 4.6 Sharded runs / distributed execution
+
+1. Show agents the sharding/stats helpers: `core/sharding.py`, `core/stats_aggregate.py`, configs in `core/config.py`, pipeline wiring in `core/pipeline.py`, QC summaries in `core/qc_controller.py`.
+2. Ask the agent to generate shard configs via the CLI (`repocapsule shard ...`) or by calling `generate_shard_configs`.
+3. After shards finish, merge stats JSON files with `repocapsule merge-stats` or `merge_pipeline_stats([...])`; combine JSONL/prompt outputs with `cat`/`zcat` or downstream tooling.
 
 ---
 

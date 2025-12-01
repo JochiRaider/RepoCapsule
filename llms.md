@@ -101,6 +101,12 @@ These are treated as the “core” of the system.
 * `plugins.py`
   Plugin discovery and registration helpers (entry-point based), wiring external sources/sinks/scorers into the registries.
 
+* `sharding.py`
+  Helpers to generate per-shard configs with isolated outputs from a base config + target list.
+
+* `stats_aggregate.py`
+  Utilities to merge multiple `PipelineStats.as_dict()` outputs (counts/flags only) for distributed runs.
+
 * `interfaces.py`
   Protocols/typed interfaces shared across the system (sources, sinks, lifecycle hooks, quality/safety scorers, etc.), plus core type aliases.
 

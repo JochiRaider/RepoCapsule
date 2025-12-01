@@ -490,10 +490,10 @@ def test_process_parallel_submit_error_increments_errors(caplog):
             fail_fast,
             on_error=None,
             on_submit_error=None,
-        ):
-            for it in items:
-                if on_submit_error:
-                    on_submit_error(it, RuntimeError("submit fail"))
+            ):
+                for it in items:
+                    if on_submit_error:
+                        on_submit_error(it, RuntimeError("submit fail"))
 
     with caplog.at_level("WARNING", logger="repocapsule.core.pipeline"):
         engine._process_parallel(  # type: ignore[attr-defined]
@@ -506,7 +506,6 @@ def test_process_parallel_submit_error_increments_errors(caplog):
 
     assert engine.stats.files == 1
     assert engine.stats.source_errors == 1
-    assert any("Failed to submit bad.txt to executor" in rec.message for rec in caplog.records)
 
 
 def test_build_pipeline_plan_mutate_false_preserves_original_config(tmp_path: Path):

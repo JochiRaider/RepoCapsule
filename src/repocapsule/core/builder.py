@@ -661,9 +661,9 @@ def _prepare_qc(
         else:
             hooks.append(PostQCHook(qc_cfg, post_qc_scorer, executor_hint=None))
 
-    qc_cfg.scorer = None
+    qc_cfg.scorer = qc_scorer
     if safety_cfg is not None:
-        safety_cfg.scorer = None  # type: ignore[attr-defined]
+        safety_cfg.scorer = safety_scorer  # type: ignore[attr-defined]
     return QCPreparationResult(
         qc_cfg=qc_cfg,
         hooks=tuple(hooks),

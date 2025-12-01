@@ -698,6 +698,7 @@ class PipelineEngine:
             )
             _log_pickling_hint(exc)
             stats.source_errors += 1
+            self._increment_file_stats(work.item)
 
         try:
             executor.map_unordered(

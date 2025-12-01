@@ -82,6 +82,31 @@ Installable entry point: `repocapsule` (also aliased as `repocapsule-qc`).
 - `repocapsule card --fragments \"out/*.card.json\" --output README.md` – merge dataset-card fragments into a single README-style card.
 - `repocapsule qc INPUT.jsonl [--csv OUT.csv] [--parallel] [--config CONFIG]` – post-hoc QC scoring of an existing JSONL; requires QC extras.
 
+### Distributed execution / sharded runs
+End-to-end split-and-run workflow for distributed launches:
+
+1. Generate sharded configs:
+   ```bash
+   repocapsule shard \
+     --targets targets.txt \
+     --base config.toml \
+     --shards 16 \
+     --out-dir shards/ \
+     --kind web_pdf_list
+   ```
+2. Run each shard independently (Slurm/K8s array jobs or `parallel 'repocapsule run -c {}' ::: shards/*.json`), writing stats next to outputs.
+3. Aggregate stats:
+   ```bash
+   repocapsule merge-stats shards/*/stats.json > merged_stats.json
+   ```
+4. Merge artifacts: `cat`/`zcat` JSONL shards, and combine dataset-card fragments via the existing `repocapsule card` command or custom tooling.
+
+**Caveats / limitations**
+- Aggregated stats are counts-only; QC signal means/stdevs are intentionally cleared.
+- Global deduplication is not performed across shards; near-duplicate families are per-shard only.
+
+Library helpers for this flow live in `core/sharding.py` and `core/stats_aggregate.py`.
+
 ## Concepts & architecture
 ### Configuration (`RepocapsuleConfig`)
 `RepocapsuleConfig` in `core/config.py` is the single source of truth for how a run is wired. Its major sections map directly to the TOML layout:

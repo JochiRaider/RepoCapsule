@@ -14,10 +14,12 @@ from ..core.factories import (
     make_output_paths_for_pdf,
     make_repo_context_from_git,
 )
+from ..core.factories_qc import make_qc_scorer  # re-export for tests
 from ..core.interfaces import RepoContext
 from ..core.licenses import detect_license_in_tree, apply_license_to_context
 from ..core.builder import build_pipeline_plan, build_engine, PipelineOverrides
 from ..core.pipeline import PipelineEngine
+from ..core.hooks import _dispatch_finalizers  # re-export for legacy tests
 from ..sources.githubio import get_repo_info, parse_github_url, RepoSpec, detect_license_for_github_repo
 from ..core.log import get_logger
 

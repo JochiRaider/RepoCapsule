@@ -1,6 +1,6 @@
 import json
 
-from repocapsule.cli.runner import _dispatch_finalizers
+from repocapsule.core.hooks import _dispatch_finalizers
 from repocapsule.core.config import RepocapsuleConfig
 from repocapsule.core.records import build_run_header_record
 from repocapsule.sinks.sinks import JSONLSink
