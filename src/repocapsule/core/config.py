@@ -577,6 +577,7 @@ class QCConfig:
     fail_on_error: bool = False
     min_score: Optional[float] = 60.0
     drop_near_dups: bool = False
+    exact_dedup: bool = True
     mode: str = QCMode.INLINE
     parallel_post: bool = False
     post_executor_kind: Optional[str] = None
@@ -662,6 +663,8 @@ class QCConfig:
                     raise ValueError(f"qc.scorer_options.heuristics.{name} must be between 0 and 1; got {value!r}.")
         else:
             self.heuristics = None
+        if "exact_dedup" not in self.scorer_options:
+            self.scorer_options["exact_dedup"] = bool(self.exact_dedup)
         if self.signals_format not in {"csv", "parquet"}:
             raise ValueError("qc.signals_format must be 'csv' or 'parquet'.")
         if hasattr(self, "safety") and isinstance(self.safety, SafetyConfig):

@@ -131,6 +131,7 @@ class JSONLQualityScorer:
         heuristics: object | None = None,
         global_dedup_path: Optional[str] = None,
         global_dedup_read_only: bool = False,
+        exact_dedup: bool = True,
     ):
         """Initialize the scorer configuration and optional models.
 
@@ -157,6 +158,8 @@ class JSONLQualityScorer:
                 global dedup store.
             global_dedup_read_only (bool): Open the global dedup store in
                 read-only mode.
+            exact_dedup (bool): When true, use exact content hashes to short-
+                circuit global dedup matches before MinHash LSH.
         """
         self.last_stats: JSONLScoreStats | None = None
         # Heuristic overrides: constructor args override heuristics; heuristics override baked-in defaults.
@@ -201,6 +204,7 @@ class JSONLQualityScorer:
         self.gopher_weight = float(gopher_weight)
         self.sim_seen: deque[tuple[int, str]] = deque(maxlen=int(simhash_window))
         self.heuristics = heuristics
+        self.exact_dedup = bool(exact_dedup)
         self.global_store = None
         if global_dedup_path:
             self.global_store = GlobalDedupStore(
@@ -228,6 +232,7 @@ class JSONLQualityScorer:
             "heuristics": heuristics,
             "global_dedup_path": global_dedup_path,
             "global_dedup_read_only": global_dedup_read_only,
+            "exact_dedup": self.exact_dedup,
         }
 
     def reset_stats(self) -> None:
@@ -266,6 +271,9 @@ class JSONLQualityScorer:
             doc_id = str(doc_id)
         else:
             doc_id = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        content_hash = meta.get("sha256")
+        if not content_hash:
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         N = int(meta.get("tokens") or approx_tokens(text))
         Tlo, Thi = target_band(lang_l, heuristics=self.heuristics)
@@ -305,6 +313,7 @@ class JSONLQualityScorer:
             res = self.global_store.check_and_add(
                 doc_id,
                 sig,
+                content_hash=content_hash if self.exact_dedup else None,
                 add_if_missing=True,
             )
             global_dup = res.is_duplicate
@@ -605,6 +614,7 @@ class DefaultQualityScorerFactory:
             heuristics=heuristics,
             global_dedup_path=global_opts.get("path"),
             global_dedup_read_only=bool(global_opts.get("read_only", False)),
+            exact_dedup=bool(opts.get("exact_dedup", True)),
         )
 
 

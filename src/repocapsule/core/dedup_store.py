@@ -97,7 +97,8 @@ class GlobalDedupStore:
             """
             CREATE TABLE IF NOT EXISTS signatures (
                 doc_id TEXT PRIMARY KEY,
-                signature BLOB
+                signature BLOB,
+                content_hash TEXT
             );
             CREATE TABLE IF NOT EXISTS lsh_index (
                 band_key TEXT,
@@ -110,8 +111,25 @@ class GlobalDedupStore:
             );
             """
         )
+        self._ensure_content_hash_column(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_content_hash ON signatures(content_hash);")
         self._ensure_metadata(conn)
         conn.commit()
+        self._ensure_content_hash_column_present(conn)
+
+    @staticmethod
+    def _ensure_content_hash_column(conn: sqlite3.Connection) -> None:
+        cur = conn.execute("PRAGMA table_info(signatures)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "content_hash" not in cols:
+            conn.execute("ALTER TABLE signatures ADD COLUMN content_hash TEXT")
+
+    @staticmethod
+    def _ensure_content_hash_column_present(conn: sqlite3.Connection) -> None:
+        cur = conn.execute("PRAGMA table_info(signatures)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "content_hash" not in cols:
+            raise ValueError("Global dedup DB is missing content_hash column; run with write access to migrate.")
 
     def _ensure_metadata(self, conn: sqlite3.Connection) -> None:
         cur = conn.execute("SELECT key, value FROM metadata")
@@ -162,6 +180,7 @@ class GlobalDedupStore:
                 "it may predate parameter tracking."
             )
         self._ensure_metadata(conn)
+        self._ensure_content_hash_column_present(conn)
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._persistent:
@@ -195,7 +214,14 @@ class GlobalDedupStore:
             )
         return struct.unpack(f"<{expected_len}I", blob)
 
-    def check_and_add(self, doc_id: str, sig: tuple[int, ...], *, add_if_missing: bool = True) -> DedupCheckResult:
+    def check_and_add(
+        self,
+        doc_id: str,
+        sig: tuple[int, ...],
+        *,
+        content_hash: Optional[str] = None,
+        add_if_missing: bool = True,
+    ) -> DedupCheckResult:
         """Check for near-duplicates and optionally add the signature."""
         assert len(sig) == self.lsh_logic.n_perm, "Signature length mismatch for configured n_perm"
         if add_if_missing and self.read_only:
@@ -203,9 +229,13 @@ class GlobalDedupStore:
 
         conn = self._get_conn()
         if self._persistent:
-            return self._check_and_add_impl(conn, doc_id, sig, add_if_missing=add_if_missing, commit=True)
+            return self._check_and_add_impl(
+                conn, doc_id, sig, content_hash=content_hash, add_if_missing=add_if_missing, commit=True
+            )
         with conn:
-            return self._check_and_add_impl(conn, doc_id, sig, add_if_missing=add_if_missing, commit=False)
+            return self._check_and_add_impl(
+                conn, doc_id, sig, content_hash=content_hash, add_if_missing=add_if_missing, commit=False
+            )
 
     def _check_and_add_impl(
         self,
@@ -213,9 +243,16 @@ class GlobalDedupStore:
         doc_id: str,
         sig: tuple[int, ...],
         *,
+        content_hash: Optional[str],
         add_if_missing: bool,
         commit: bool,
     ) -> DedupCheckResult:
+        if content_hash:
+            cur = conn.execute("SELECT doc_id FROM signatures WHERE content_hash = ?", (content_hash,))
+            row = cur.fetchone()
+            if row is not None:
+                return DedupCheckResult(True, 1.0, row[0])
+
         band_keys = [f"{b}:{self.lsh_logic.band_key(sig, b)[1]}" for b in range(self.lsh_logic.bands)]
 
         candidates: set[str] = set()
@@ -245,8 +282,8 @@ class GlobalDedupStore:
         if add_if_missing:
             try:
                 conn.execute(
-                    "INSERT INTO signatures (doc_id, signature) VALUES (?, ?)",
-                    (doc_id, self._pack_sig(sig)),
+                    "INSERT INTO signatures (doc_id, signature, content_hash) VALUES (?, ?, ?)",
+                    (doc_id, self._pack_sig(sig), content_hash),
                 )
                 conn.executemany(
                     "INSERT INTO lsh_index (band_key, doc_id) VALUES (?, ?)",
@@ -259,15 +296,15 @@ class GlobalDedupStore:
 
         return DedupCheckResult(is_dup, score, best_id)
 
-    def bulk_add(self, items: Iterable[Tuple[str, tuple[int, ...]]]) -> None:
+    def bulk_add(self, items: Iterable[Tuple[str, tuple[int, ...], Optional[str]]]) -> None:
         """Insert many signatures efficiently."""
         if self.read_only:
             raise ValueError("Cannot bulk add to GlobalDedupStore in read-only mode.")
 
-        batch: list[Tuple[str, tuple[int, ...]]] = []
-        for doc_id, sig in items:
+        batch: list[Tuple[str, tuple[int, ...], Optional[str]]] = []
+        for doc_id, sig, content_hash in items:
             assert len(sig) == self.lsh_logic.n_perm, "Signature length mismatch for configured n_perm"
-            batch.append((doc_id, sig))
+            batch.append((doc_id, sig, content_hash))
             if len(batch) >= _BULK_INSERT_BATCH_SIZE:
                 self._bulk_insert(batch)
                 batch.clear()
@@ -287,15 +324,15 @@ class GlobalDedupStore:
     def _bulk_insert_with_conn(
         self,
         conn: sqlite3.Connection,
-        batch: list[Tuple[str, tuple[int, ...]]],
+        batch: list[Tuple[str, tuple[int, ...], Optional[str]]],
         *,
         commit: bool,
     ) -> None:
         # Deduplicate doc_ids within the batch
-        unique_batch: dict[str, tuple[int, ...]] = {}
-        for doc_id, sig in batch:
+        unique_batch: dict[str, tuple[tuple[int, ...], Optional[str]]] = {}
+        for doc_id, sig, content_hash in batch:
             if doc_id not in unique_batch:
-                unique_batch[doc_id] = sig
+                unique_batch[doc_id] = (sig, content_hash)
 
         doc_ids = list(unique_batch.keys())
         if not doc_ids:
@@ -305,15 +342,15 @@ class GlobalDedupStore:
         cur = conn.execute(f"SELECT doc_id FROM signatures WHERE doc_id IN ({placeholders})", doc_ids)
         existing = {row[0] for row in cur.fetchall()}
 
-        to_insert = [(doc_id, sig) for doc_id, sig in unique_batch.items() if doc_id not in existing]
+        to_insert = [(doc_id, sig, content_hash) for doc_id, (sig, content_hash) in unique_batch.items() if doc_id not in existing]
         if not to_insert:
             return
 
-        sig_rows = [(doc_id, self._pack_sig(sig)) for doc_id, sig in to_insert]
-        conn.executemany("INSERT INTO signatures (doc_id, signature) VALUES (?, ?)", sig_rows)
+        sig_rows = [(doc_id, self._pack_sig(sig), content_hash) for doc_id, sig, content_hash in to_insert]
+        conn.executemany("INSERT INTO signatures (doc_id, signature, content_hash) VALUES (?, ?, ?)", sig_rows)
 
         index_rows = []
-        for doc_id, sig in to_insert:
+        for doc_id, sig, _content_hash in to_insert:
             for b in range(self.lsh_logic.bands):
                 band_key = f"{b}:{self.lsh_logic.band_key(sig, b)[1]}"
                 index_rows.append((band_key, doc_id))

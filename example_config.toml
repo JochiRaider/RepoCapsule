@@ -229,6 +229,7 @@ signals_format = "csv"       # "csv" or "parquet" for QC signals sidecars
 fail_on_error = false        # Raise on QC errors rather than logging and continuing
 min_score = 60.0             # Minimum QC score required to keep records (inline/advisory modes)
 drop_near_dups = false       # Drop near-duplicate records based on QC duplicate detection
+exact_dedup = true           # Use exact content hashes to short-circuit global dedup (when available)
 mode = "inline"               # "inline", "advisory", "post", or "off"
 parallel_post = false        # Use process-based parallelism for post-QC when true
 # post_executor_kind = "process" # Executor kind override for post-QC scoring

@@ -23,7 +23,7 @@ from repocapsule.core.dedup_store import GlobalDedupStore
 from repocapsule.core.qc_utils import minhash_signature_for_text, open_jsonl_maybe_gz
 
 
-def _iter_signatures(paths: Iterable[str], *, k: int, n_perm: int) -> Iterator[Tuple[str, tuple[int, ...]]]:
+def _iter_signatures(paths: Iterable[str], *, k: int, n_perm: int) -> Iterator[Tuple[str, tuple[int, ...], str]]:
     for path in paths:
         with open_jsonl_maybe_gz(path) as fp:
             for line in fp:
@@ -38,8 +38,9 @@ def _iter_signatures(paths: Iterable[str], *, k: int, n_perm: int) -> Iterator[T
                     doc_id = str(doc_id)
                 else:
                     doc_id = hashlib.sha1(text.encode("utf-8")).hexdigest()
+                content_hash = meta.get("sha256") or hashlib.sha256(text.encode("utf-8")).hexdigest()
                 sig = minhash_signature_for_text(text, k=k, n_perm=n_perm)
-                yield doc_id, sig
+                yield doc_id, sig, content_hash
 
 
 def main(argv: list[str] | None = None) -> int:
