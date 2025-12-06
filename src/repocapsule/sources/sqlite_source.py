@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import urllib.error
 import urllib.request
@@ -56,6 +57,7 @@ class SQLiteSource(Source):
     download_max_bytes: Optional[int] = None
     retries: int = 2
     client: Optional[safe_http.SafeHttpClient] = None
+    checksum: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Normalizes configuration after initialization."""
@@ -104,13 +106,28 @@ class SQLiteSource(Source):
         except sqlite3.Error as exc:
             log.warning("Failed to read SQLite DB %s: %s", db_path, exc)
 
+    def _verify_checksum(self, path: Path) -> None:
+        """Verify database content against the configured checksum when provided."""
+        if not self.checksum:
+            return
+        expected = self.checksum.strip().lower()
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while chunk := f.read(8192):
+                h.update(chunk)
+        actual = h.hexdigest()
+        if actual != expected:
+            raise ValueError(f"Checksum mismatch for {path}: expected {expected}, got {actual}")
+
     def _ensure_db_local(self) -> Path:
         """Ensures the database file is available locally, downloading if needed."""
         if self.db_path.exists():
+            self._verify_checksum(self.db_path)
             return self.db_path
         if not self.db_url:
             raise FileNotFoundError(self.db_path)
         self._download_db()
+        self._verify_checksum(self.db_path)
         if self.db_path.exists():
             return self.db_path
         raise FileNotFoundError(self.db_path)

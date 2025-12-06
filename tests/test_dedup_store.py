@@ -1,3 +1,6 @@
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from repocapsule.core.dedup_store import GlobalDedupStore
@@ -53,7 +56,6 @@ def test_exact_dedup_short_circuit(tmp_path) -> None:
 
 def test_schema_migration_adds_content_hash(tmp_path) -> None:
     db_path = tmp_path / "old.db"
-    import sqlite3
 
     with sqlite3.connect(db_path) as conn:
         conn.executescript(
@@ -77,3 +79,25 @@ def test_schema_migration_adds_content_hash(tmp_path) -> None:
     with sqlite3.connect(db_path) as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(signatures)")}
         assert "content_hash" in cols
+
+
+def test_global_dedup_store_handles_concurrent_writes(tmp_path) -> None:
+    db_path = tmp_path / "dedup.db"
+    n_perm = 8
+    bands = 2
+
+    def make_sig(seed: int) -> tuple[int, ...]:
+        return tuple((seed + i) % 97 for i in range(n_perm))
+
+    def add_one(i: int) -> bool:
+        with GlobalDedupStore(db_path, n_perm=n_perm, bands=bands, persistent_connection=False) as store:
+            res = store.check_and_add(f"id-{i}", make_sig(i), add_if_missing=True)
+            return res.is_duplicate
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        dup_flags = list(pool.map(add_one, range(20)))
+
+    assert all(flag is False for flag in dup_flags)
+    with sqlite3.connect(db_path) as conn:
+        (count,) = conn.execute("SELECT COUNT(*) FROM signatures").fetchone()
+        assert count == 20

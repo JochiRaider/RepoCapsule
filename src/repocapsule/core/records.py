@@ -531,6 +531,12 @@ def build_record(
         except Exception:
             domain = None
 
+    risky_fallback_encodings = {"latin-1", "iso-8859-1", "cp1252"}
+    if encoding and encoding.lower() in risky_fallback_encodings:
+        if extra_meta is None:
+            extra_meta = {}
+        extra_meta["decoding_fallback_used"] = True
+
     seed: Optional[Mapping[str, Any]]
     if isinstance(meta, RecordMeta):
         seed = meta.to_dict()

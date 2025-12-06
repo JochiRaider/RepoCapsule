@@ -8,6 +8,7 @@ ingestion pipeline and quality-control scoring.
 """
 from __future__ import annotations
 
+import functools
 from concurrent.futures import (
     FIRST_COMPLETED,
     Future,
@@ -26,6 +27,14 @@ log = get_logger(__name__)
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+
+def _call_process_one(
+    process_one: Callable[[T], Tuple[Any, Iterable[Any]]],
+    item: T,
+) -> Tuple[Any, Iterable[Any]]:
+    """Top-level helper so process pool workers can pickle the callable."""
+    return process_one(item)
 
 
 @dataclass(frozen=True)
@@ -240,6 +249,12 @@ def process_items_parallel(
     def _worker(item: T) -> Tuple[Any, Iterable[Any]]:
         return process_one(item)
 
+    worker_fn: Callable[[T], Tuple[Any, Iterable[Any]]]
+    if normalized_kind == "process":
+        worker_fn = functools.partial(_call_process_one, process_one)
+    else:
+        worker_fn = _worker
+
     def _on_result(result: Tuple[Any, Iterable[Any]]) -> None:
         item, recs = result
         write_records(item, recs)
@@ -250,7 +265,7 @@ def process_items_parallel(
 
     executor.map_unordered(
         items,
-        _worker,
+        worker_fn,
         _on_result,
         fail_fast=fail_fast,
         on_error=_on_error,

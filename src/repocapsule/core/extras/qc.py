@@ -13,7 +13,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import os
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Mapping
 
@@ -28,9 +27,9 @@ from ..qc_utils import (
     PerplexityModel,
     approx_tokens,
     ascii_ratio,
+    SimHashWindowIndex,
     code_complexity,
     gopher_quality,
-    hamming,
     minhash_signature_for_text,
     parse_ok,
     repetition_rate,
@@ -202,7 +201,12 @@ class JSONLQualityScorer:
         self.minhash_threshold = self.lsh.jaccard_threshold
         self.enable_gopher = bool(enable_gopher)
         self.gopher_weight = float(gopher_weight)
-        self.sim_seen: deque[tuple[int, str]] = deque(maxlen=int(simhash_window))
+        self.sim_index = SimHashWindowIndex(
+            window_size=int(simhash_window),
+            hamming_thresh=self.sim_thresh,
+        )
+        # Backwards compatibility for tests/consumers expecting a deque
+        self.sim_seen = self.sim_index.queue
         self.heuristics = heuristics
         self.exact_dedup = bool(exact_dedup)
         self.global_store = None
@@ -220,7 +224,7 @@ class JSONLQualityScorer:
             "device": device,
             "dtype": dtype,
             "simhash_hamm_thresh": self.sim_thresh,
-            "simhash_window": self.sim_seen.maxlen or simhash_window,
+            "simhash_window": self.sim_index.window_size,
             "local_files_only": local_files_only,
             "enable_minhash": self.enable_minhash,
             "minhash_perms": self.lsh.n_perm,
@@ -285,15 +289,9 @@ class JSONLQualityScorer:
         p_ok = parse_ok(text, lang)
 
         sh = simhash64(text)
-        ham_min: Optional[int] = None
-        sim_dup_of: Optional[str] = None
-        for other_hash, other_id in self.sim_seen:
-            dist = hamming(sh, other_hash)
-            if ham_min is None or dist < ham_min:
-                ham_min = dist
-                sim_dup_of = other_id
-        near_dup_sim = ham_min is not None and ham_min < self.sim_thresh
-        self.sim_seen.append((sh, doc_id))
+        ham_min, sim_dup_of = self.sim_index.query(sh)
+        near_dup_sim = ham_min is not None
+        self.sim_index.add(sh, doc_id)
 
         near_dup_mh, mh_j, mh_of = False, 0.0, None
         need_minhash = self.enable_minhash or self.global_store is not None
@@ -402,7 +400,7 @@ class JSONLQualityScorer:
 
     def reset_state(self) -> None:
         """Clear duplicate detection state for a fresh scoring pass."""
-        self.sim_seen.clear()
+        self.sim_index.reset()
         if self.lsh is not None:
             self.lsh.reset()
 

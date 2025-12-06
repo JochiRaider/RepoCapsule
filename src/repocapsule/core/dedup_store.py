@@ -10,6 +10,7 @@ connections plus batched inserts for seeding.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import struct
 from pathlib import Path
@@ -160,7 +161,12 @@ class GlobalDedupStore:
         if (
             stored_n_perm != self.lsh_logic.n_perm
             or stored_bands != self.lsh_logic.bands
-            or stored_thresh != self.lsh_logic.jaccard_threshold
+            or not math.isclose(
+                stored_thresh,
+                self.lsh_logic.jaccard_threshold,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
         ):
             raise ValueError(
                 "Global dedup DB parameter mismatch: "

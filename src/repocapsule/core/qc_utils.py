@@ -16,6 +16,7 @@ import os
 import random
 import re
 import zlib
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TextIO, TYPE_CHECKING
 
@@ -45,6 +46,7 @@ __all__ = [
     "top_dup_families",
     "open_jsonl_maybe_gz",
     "open_jsonl_output_maybe_gz",
+    "SimHashWindowIndex",
 ]
 
 
@@ -329,6 +331,70 @@ def simhash64(text: str) -> int:
 def hamming(a: int, b: int) -> int:
     """Return the Hamming distance between two integers."""
     return (a ^ b).bit_count()
+
+
+class SimHashWindowIndex:
+    """Sliding-window LSH index for SimHash using 4 x 16-bit bands."""
+
+    __slots__ = ("window_size", "thresh", "queue", "tables")
+
+    def __init__(self, window_size: int, hamming_thresh: int = 4) -> None:
+        self.window_size = max(1, int(window_size))
+        self.thresh = int(hamming_thresh)
+        self.queue: deque[tuple[int, str]] = deque()
+        self.tables: list[dict[int, list[tuple[int, str]]]] = [defaultdict(list) for _ in range(4)]
+
+    @staticmethod
+    def _band_keys(h: int) -> tuple[int, int, int, int]:
+        return (
+            h & 0xFFFF,
+            (h >> 16) & 0xFFFF,
+            (h >> 32) & 0xFFFF,
+            (h >> 48) & 0xFFFF,
+        )
+
+    def _evict_if_needed(self) -> None:
+        if len(self.queue) < self.window_size:
+            return
+        old_h, old_id = self.queue.popleft()
+        for idx, key in enumerate(self._band_keys(old_h)):
+            bucket = self.tables[idx].get(key)
+            if not bucket:
+                continue
+            self.tables[idx][key] = [(h, i) for (h, i) in bucket if not (h == old_h and i == old_id)]
+            if not self.tables[idx][key]:
+                del self.tables[idx][key]
+
+    def add(self, h: int, doc_id: str) -> None:
+        self._evict_if_needed()
+        self.queue.append((h, doc_id))
+        for idx, key in enumerate(self._band_keys(h)):
+            self.tables[idx][key].append((h, doc_id))
+
+    def query(self, h: int) -> tuple[Optional[int], Optional[str]]:
+        candidates: set[tuple[int, str]] = set()
+        for idx, key in enumerate(self._band_keys(h)):
+            bucket = self.tables[idx].get(key)
+            if bucket:
+                candidates.update(bucket)
+        if not candidates:
+            return None, None
+
+        best_dist = None
+        best_id = None
+        for cand_h, cand_id in candidates:
+            dist = hamming(h, cand_h)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_id = cand_id
+        if best_dist is not None and best_dist < self.thresh:
+            return best_dist, best_id
+        return None, None
+
+    def reset(self) -> None:
+        self.queue.clear()
+        for table in self.tables:
+            table.clear()
 
 
 # ---------- MinHash + LSH ----------

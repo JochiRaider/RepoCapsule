@@ -438,6 +438,8 @@ class SQLiteSourceFactory(SourceFactory):
                 "id_column",
                 "where",
                 "download_timeout",
+                "checksum",
+                "sha256",
             ),
             context="sources.specs.sqlite",
         )
@@ -454,6 +456,8 @@ class SQLiteSourceFactory(SourceFactory):
                 "id_column",
                 "where",
                 "download_timeout",
+                "checksum",
+                "sha256",
             ),
         )
 
@@ -469,6 +473,7 @@ class SQLiteSourceFactory(SourceFactory):
             text_columns = (text_columns,)
         id_column = options.get("id_column")
         where = options.get("where")
+        checksum = options.get("checksum") or options.get("sha256")
 
         batch_size = sqlite_cfg.batch_size
         download_timeout = options.get("download_timeout", ctx.http_config.timeout)
@@ -493,6 +498,7 @@ class SQLiteSourceFactory(SourceFactory):
             download_max_bytes=download_max_bytes,
             retries=retries,
             client=client,
+            checksum=checksum,
         )
         return [src]
 
