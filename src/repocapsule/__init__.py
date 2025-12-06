@@ -155,7 +155,7 @@ from .core.convert import (
 from .core.interfaces import FileExtractor, FileItem, RepoContext, Source, Sink, Extractor, RunLifecycleHook, RunContext
 from .core.pipeline import run_pipeline, PipelineStats, PipelineEngine
 from .cli.runner import run_engine
-from .core.factories import make_web_pdf_source
+from .core.factories_sources import make_web_pdf_source
 
 
 # Optional extras (not part of PRIMARY_API)

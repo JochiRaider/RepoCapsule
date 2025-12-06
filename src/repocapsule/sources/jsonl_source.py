@@ -13,6 +13,7 @@ import gzip
 
 from ..core.interfaces import Source, FileItem, RepoContext
 from ..core.log import get_logger
+from ..core.records import check_record_schema
 
 log = get_logger(__name__)
 
@@ -44,6 +45,7 @@ class JSONLTextSource(Source):
             opener = _open_jsonl_gz if "".join(path.suffixes[-2:]).lower() == ".jsonl.gz" else _open_jsonl
             try:
                 with opener(path) as fp:
+                    checked_schema = False
                     for lineno, line in enumerate(fp, start=1):
                         line = line.strip()
                         if not line:
@@ -53,6 +55,9 @@ class JSONLTextSource(Source):
                         except Exception as exc:
                             log.warning("Skipping invalid JSON at %s:#%d: %s", path, lineno, exc)
                             continue
+                        if isinstance(record, dict) and not checked_schema:
+                            check_record_schema(record, log)
+                            checked_schema = True
                         text = _extract_text(record, self.text_key)
                         if text is None:
                             # Skip records missing the configured text field.

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from .config import RepocapsuleConfig, FileProcessingConfig, DecodeConfig, ChunkConfig
 from .chunk import ChunkPolicy, iter_chunk_dicts
 from .decode import decode_bytes
-from .factories import UnsupportedBinary
+from .factories_sources import UnsupportedBinary
 from ..sources.fs import read_file_prefix
 from .interfaces import FileExtractor, FileItem, RepoContext, Record, StreamingExtractor
 from .language_id import classify_path_kind

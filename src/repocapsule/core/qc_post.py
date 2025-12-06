@@ -10,11 +10,11 @@ import json
 
 from .config import RepocapsuleConfig, QCConfig, QCMode
 from .concurrency import Executor, resolve_qc_executor_config
-from .factories import make_qc_scorer
+from .factories_qc import make_qc_scorer
 from .interfaces import RunLifecycleHook, RunContext, RunArtifacts
 from .log import get_logger
 from .qc_controller import QCSummaryTracker, summarize_qc_rows, _derive_csv_path
-from .records import filter_qc_meta
+from .records import filter_qc_meta, check_record_schema
 from .qc_utils import open_jsonl_maybe_gz
 
 log = get_logger(__name__)
@@ -583,6 +583,7 @@ def _score_lines(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     label = shard_label or source_path
+    checked_schema = False
     for idx, line in enumerate(lines, start=1):
         try:
             record = json.loads(line)
@@ -606,6 +607,9 @@ def _score_lines(
         meta = record.get("meta") if isinstance(record, dict) else None
         if isinstance(meta, dict) and meta.get("kind") in {"run_header", "run_summary", "qc_summary"}:
             continue
+        if not checked_schema:
+            check_record_schema(record, log)
+            checked_schema = True
         try:
             rows.append(scorer.score_record(record))
         except StopIteration:

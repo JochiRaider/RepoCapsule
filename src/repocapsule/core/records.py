@@ -16,6 +16,7 @@ from .language_id import (
     DEFAULT_LANGCFG,
     guess_lang_from_path,
 )
+from .log import get_logger
 
 __all__ = [
     "sha256_text",
@@ -30,7 +31,10 @@ __all__ = [
     "is_summary_record",
     "filter_qc_meta",
     "filter_safety_meta",
+    "check_record_schema",
 ]
+
+log = get_logger(__name__)
 
 # -----------------------
 # Hashing utilities
@@ -215,6 +219,35 @@ def filter_safety_meta(safety_result: Mapping[str, Any]) -> Tuple[Dict[str, Any]
             continue
         safety_signals[key] = value
     return canonical, safety_signals
+
+
+def check_record_schema(record: Mapping[str, Any], logger: Any | None = None) -> None:
+    """Emit diagnostics when a record's schema_version differs from this library."""
+
+    meta = record.get("meta")
+    if not isinstance(meta, Mapping):
+        return
+
+    version = meta.get("schema_version")
+    logger_obj = logger or log
+
+    if version is None:
+        logger_obj.debug("Record missing schema_version; treating as legacy schema.")
+        return
+
+    version_str = str(version)
+    if version_str > RECORD_META_SCHEMA_VERSION:
+        logger_obj.warning(
+            "Record schema_version %s is newer than library schema_version %s; ensure compatibility before scoring.",
+            version_str,
+            RECORD_META_SCHEMA_VERSION,
+        )
+    elif version_str < RECORD_META_SCHEMA_VERSION:
+        logger_obj.debug(
+            "Record schema_version %s is older than library schema_version %s; proceeding with backward compatibility.",
+            version_str,
+            RECORD_META_SCHEMA_VERSION,
+        )
 
 
 def _meta_to_dict(obj: Any) -> Dict[str, Any]:

@@ -26,14 +26,16 @@ from .interfaces import (
     QualityScorer,
     SafetyScorer,
     RunLifecycleHook,
+    RecordMiddleware,
 )
 from .safe_http import SafeHttpClient
 from .log import get_logger
-from .factories import make_bytes_handlers, make_qc_scorer, make_safety_scorer
+from .factories_sources import make_bytes_handlers
+from .factories_qc import make_qc_scorer, make_safety_scorer
 from .convert import DefaultExtractor
 from .chunk import ChunkPolicy
 from .records import build_run_header_record
-from .hooks import RunSummaryHook
+from .hooks import RunSummaryHook, LanguageTaggingMiddleware
 from .dataset_card import DatasetCardHook
 from .registries import (
     SourceRegistry,
@@ -63,8 +65,7 @@ Sniff = Callable[[bytes, str], bool]
 BytesHandler = Callable[[bytes, str, Optional[RepoContext], Optional[ChunkPolicy]], Optional[Iterable[Record]]]
 
 if TYPE_CHECKING:  # pragma: no cover
-    # Import middleware protocols only for typing to avoid cycles.
-    from .interfaces import RecordMiddleware, FileMiddleware
+    from .interfaces import FileMiddleware
 
 
 @dataclass(slots=True)
@@ -141,6 +142,9 @@ class PipelineRuntime:
             chunk files that are not handled by bytes handlers.
         bytes_handlers (Sequence[tuple[Sniff, BytesHandler]]): Ordered
             (sniff, handler) pairs used for binary formats.
+        record_middlewares (Sequence[RecordMiddleware]): Per-record
+            middlewares applied by the engine before records reach
+            sinks.
         lifecycle_hooks (Sequence[RunLifecycleHook]): Hooks invoked at
             run start/end and per record.
         executor_config (Any | None): Executor configuration determined
@@ -161,6 +165,7 @@ class PipelineRuntime:
     sinks: Sequence[Sink]
     file_extractor: FileExtractor
     bytes_handlers: Sequence[Tuple[Sniff, BytesHandler]]
+    record_middlewares: Sequence[RecordMiddleware] = ()
     lifecycle_hooks: Sequence[RunLifecycleHook] = ()
     executor_config: Any | None = None
     fail_fast: bool = False
@@ -339,6 +344,9 @@ def build_pipeline_plan(
         overrides=overrides,
     )
     lang_det, code_lang_det = _prepare_language_detectors(cfg, overrides=overrides)
+    middlewares: list[RecordMiddleware] = []
+    if lang_det is not None or code_lang_det is not None:
+        middlewares.append(LanguageTaggingMiddleware(lang_det, code_lang_det))
     cfg.sinks = sinks_res.sinks_cfg
     cfg.metadata = sinks_res.metadata
     cfg.qc = qc_res.qc_cfg
@@ -363,6 +371,7 @@ def build_pipeline_plan(
         sinks=sinks_res.sinks,
         file_extractor=file_extractor,
         bytes_handlers=bytes_handlers,
+        record_middlewares=tuple(middlewares),
         lifecycle_hooks=tuple(lifecycle_hooks),
         qc_scorer_for_csv=qc_res.scorer_for_csv,
         post_qc_scorer=qc_res.post_qc_scorer,

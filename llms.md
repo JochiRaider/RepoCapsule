@@ -60,7 +60,7 @@ These are treated as the “core” of the system.
   Configuration models and helpers for defining `RepocapsuleConfig` and related config sections (sources, sinks, QC, safety, chunking, etc.).
 
 * `records.py`
-  Construction and normalization of output record dictionaries, including run headers and consistent metadata fields.
+  Construction and normalization of output record dictionaries, including run headers and consistent metadata fields. Also hosts schema-version helpers (`check_record_schema`) to warn when ingesting JSONL produced by mismatched library versions.
 
 * `naming.py`
   Utilities for building safe, normalized output filenames and extensions based on config and repo context.
@@ -117,10 +117,10 @@ These are treated as the “core” of the system.
   Orchestrates config → `PipelinePlan`/`PipelineRuntime` construction: builds sources, sinks, bytes handlers, HTTP client, lifecycle hooks, QC wiring, and language detectors from a `RepocapsuleConfig`. Hosts `PipelineOverrides` and `build_engine`, which is the preferred entry point for wiring runtime-only overrides (HTTP/QC/safety scorers, language detectors, bytes handlers, file extractor, and record/file middlewares) into a `PipelineEngine`. If you are changing how configs become runtime objects or how overrides/hooks/QC wiring are applied, start here.
 
 * `hooks.py`
-  Built-in pipeline lifecycle hooks for run summaries/finalizers used by the builder to assemble runtime hooks.
+  Built-in pipeline lifecycle hooks for run summaries/finalizers used by the builder to assemble runtime hooks. Hosts `LanguageTaggingMiddleware`, which the builder instantiates from configured detectors and carries on `PipelineRuntime`.
 
 * `pipeline.py`
-  Pipeline engine that runs the ingestion loop: coordinates sources, decoding/chunking/record creation, sinks, hooks, middleware, and statistics. Defines `PipelineEngine`, record/file middleware adapters (`add_record_middleware`, `add_file_middleware` plus `_FuncRecordMiddleware`/`_FuncFileMiddleware`), `LanguageTaggingMiddleware` (auto-attached based on configured detectors), and helpers like `run_pipeline` and `apply_overrides_to_engine` that turn a config + `PipelineOverrides` into a fully wired engine. If you need to adjust overall run flow or middleware behavior, this is usually the right place – but prefer adding middlewares/hooks over modifying the engine itself.
+  Pipeline engine that runs the ingestion loop: coordinates sources, decoding/chunking/record creation, sinks, hooks, middleware, and statistics. Defines `PipelineEngine`, record/file middleware adapters (`add_record_middleware`, `add_file_middleware` plus `_FuncRecordMiddleware`/`_FuncFileMiddleware`), and helpers like `run_pipeline` and `apply_overrides_to_engine` that turn a config + `PipelineOverrides` into a fully wired engine. The engine consumes record middlewares carried on `PipelineRuntime` (for example, the language-tagging middleware from `hooks.py`). If you need to adjust overall run flow or middleware behavior, this is usually the right place – but prefer adding middlewares/hooks over modifying the engine itself.
 
 * `qc_utils.py`
   Low-level quality-control utilities (similarity hashing, duplicate detection, basic QC heuristics and summaries).

@@ -102,6 +102,7 @@ For rules, invariants, and AI usage guidelines, see `agents.md`.
     ├── test_qc_defaults.py
     ├── test_qc_integration.py
     ├── test_qc_post.py
+    ├── test_schema_validation.py
     ├── test_sharding.py
     ├── test_stats_aggregate.py
     ├── test_records.py

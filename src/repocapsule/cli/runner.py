@@ -9,11 +9,8 @@ from typing import Optional, Dict, Any, List
 import os
 
 from ..core.config import RepocapsuleConfig, SourceSpec, SinkSpec
-from ..core.factories import (
-    make_output_paths_for_github,
-    make_output_paths_for_pdf,
-    make_repo_context_from_git,
-)
+from ..core.factories_sinks import make_output_paths_for_github, make_output_paths_for_pdf
+from ..core.factories_context import make_repo_context_from_git
 from ..core.factories_qc import make_qc_scorer  # re-export for tests
 from ..core.interfaces import RepoContext
 from ..core.licenses import detect_license_in_tree, apply_license_to_context

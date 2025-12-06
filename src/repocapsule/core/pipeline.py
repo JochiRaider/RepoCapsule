@@ -25,7 +25,6 @@ from .interfaces import (
     RunLifecycleHook,
     RunSummaryView,
 )
-from .language_id import CodeLanguageDetector, LanguageDetector
 from .concurrency import (
     Executor,
     process_items_parallel,
@@ -34,7 +33,6 @@ from .concurrency import (
 from .convert import DefaultExtractor
 from .log import get_logger
 from .qc_controller import QCSummaryTracker
-from .records import ensure_meta_dict
 
 
 log = get_logger(__name__)
@@ -67,47 +65,6 @@ class _FuncFileMiddleware:
 
     def process(self, item: Any, records: Iterable[Record]) -> Optional[Iterable[Record]]:
         return self._fn(item, records)
-
-
-class LanguageTaggingMiddleware:
-    """Attach language metadata using configured detectors."""
-
-    def __init__(self, lang_det: LanguageDetector | None, code_det: CodeLanguageDetector | None) -> None:
-        self._lang_det = lang_det
-        self._code_det = code_det
-
-    def process(self, record: Record) -> Record | None:
-        meta = ensure_meta_dict(record)
-        text = record.get("text") or ""
-        path_hint = meta.get("path")
-
-        if self._lang_det is not None and "language" not in meta:
-            try:
-                pred = self._lang_det.detect(text)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("language detector failed for %s: %s", path_hint or "<unknown>", exc)
-                pred = None
-            if pred:
-                meta.setdefault("language", pred.code)
-                meta.setdefault("language_confidence", pred.score)
-                if getattr(pred, "backend", None):
-                    meta.setdefault("language_backend", pred.backend)
-
-        if self._code_det is not None:
-            try:
-                pred_code = self._code_det.detect_code(text, filename=path_hint)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("code language detector failed for %s: %s", path_hint or "<unknown>", exc)
-                pred_code = None
-            if pred_code:
-                current_lang = meta.get("lang")
-                if not current_lang or str(current_lang).lower() in {"text", "unknown"}:
-                    meta["lang"] = pred_code.lang
-                    if getattr(pred_code, "backend", None):
-                        meta["lang_backend"] = pred_code.backend
-                    meta.setdefault("lang_score", pred_code.score)
-
-        return record
 
 
 def apply_overrides_to_engine(
@@ -348,10 +305,9 @@ class PipelineEngine:
         self.after_source_hooks: List[Callable[[Source], None]] = []
         self._middlewares_normalized = False
         rt = getattr(plan, "runtime", None)
-        lang_det = getattr(rt, "language_detector", None) if rt else None
-        code_lang_det = getattr(rt, "code_language_detector", None) if rt else None
-        if lang_det is not None or code_lang_det is not None:
-            self.add_record_middleware(LanguageTaggingMiddleware(lang_det, code_lang_det))
+        if rt and getattr(rt, "record_middlewares", None):
+            for mw in rt.record_middlewares:
+                self.add_record_middleware(mw)
 
     def add_record_middleware(self, middleware: RecordMiddleware | Callable[[Record], Any]) -> None:
         """Register a record middleware or bare callable."""
@@ -850,4 +806,4 @@ def run_pipeline(*, config: RepocapsuleConfig, overrides: PipelineOverrides | No
     stats_obj = engine.run()
     return stats_obj.as_dict()
 
-__all__ = ["run_pipeline", "PipelineStats", "PipelineEngine", "process_items_parallel", "LanguageTaggingMiddleware"]
+__all__ = ["run_pipeline", "PipelineStats", "PipelineEngine", "process_items_parallel"]

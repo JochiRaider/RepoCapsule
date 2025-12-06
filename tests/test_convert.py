@@ -9,7 +9,7 @@ from repocapsule.core.convert import (
     iter_records_from_file_item,
     list_records_for_file,
 )
-from repocapsule.core.factories import UnsupportedBinary
+from repocapsule.core.factories_sources import UnsupportedBinary
 from repocapsule.core.interfaces import FileItem, RepoContext
 
 
