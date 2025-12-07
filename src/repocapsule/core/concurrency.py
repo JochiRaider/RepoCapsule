@@ -273,119 +273,24 @@ def process_items_parallel(
     )
 
 
-def _has_heavy_binary_handlers(cfg: RepocapsuleConfig, runtime: Any | None = None) -> bool:
-    """Detect whether the pipeline uses heavy binary bytes handlers.
-
-
-    The heuristic looks for PDF/EVTX-oriented handlers on the pipeline
-    configuration or runtime, based on handler names and module
-    prefixes.
-
-    Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
-        runtime (Any | None): Optional runtime object overriding or
-            augmenting the configured bytes handlers.
-
-    Returns:
-        bool: True if handlers strongly suggest heavy PDF/EVTX
-            processing, False otherwise.
-    """
-    try:
-        handlers = cfg.pipeline.bytes_handlers
-    except Exception:
-        handlers = ()
-    if runtime is not None:
-        handlers = getattr(runtime, "bytes_handlers", None) or handlers
-
-    for _sniff, handler in handlers:
-        name = getattr(handler, "__name__", "").lower()
-        mod = getattr(handler, "__module__", "").lower()
-        if name in {"handle_pdf", "handle_evtx"}:
-            return True
-        if "pdfio" in mod or "evtxio" in mod:
-            return True
-    return False
-
-
-def _has_heavy_sources(cfg: RepocapsuleConfig, runtime: Any | None = None) -> bool:
-    """Heuristically detect heavy binary sources in the configuration.
-
-
-    Sources and source runtime objects are inspected for PDF/EVTX-like
-    types or filename extensions that imply expensive binary parsing.
-
-    Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
-        runtime (Any | None): Optional runtime object providing active
-            source instances.
-
-    Returns:
-        bool: True if the configured or runtime sources suggest heavy
-            PDF/EVTX ingestion, False otherwise.
-    """
-    try:
-        src_cfg = cfg.sources
-    except Exception:
-        src_cfg = None
-
-    runtime_sources = getattr(runtime, "sources", None)
-    if runtime_sources:
-        for src in runtime_sources:
-            try:
-                cls_name = type(src).__name__.lower()
-            except Exception:
-                continue
-            if "pdf" in cls_name or "evtx" in cls_name:
-                return True
-
-    if src_cfg:
-        try:
-            for src in getattr(src_cfg, "sources", ()):
-                cls_name = type(src).__name__.lower()
-                if "pdf" in cls_name or "evtx" in cls_name:
-                    return True
-        except Exception:
-            pass
-
-    local_cfg = getattr(src_cfg, "local", None)
-    if local_cfg and getattr(local_cfg, "include_exts", None):
-        exts = {e.lower() for e in local_cfg.include_exts}
-        if ".pdf" in exts or ".evtx" in exts:
-            return True
-
-    gh_cfg = getattr(src_cfg, "github", None)
-    if gh_cfg and getattr(gh_cfg, "include_exts", None):
-        exts = {e.lower() for e in gh_cfg.include_exts}
-        if ".pdf" in exts or ".evtx" in exts:
-            return True
-
-    return False
-
-
 def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
-    """Extract concurrency preferences from an object.
+    """
+    Extract concurrency preferences from an object.
 
-
-    The object is inspected directly and via an optional
-    ``concurrency_profile`` attribute for a preferred executor kind
-    and whether the work is CPU intensive.
-
-    Args:
-        obj (Any): Object that may expose concurrency hints.
-
-    Returns:
-        tuple[Optional[str], bool]: Normalized preferred executor
-            (``"thread"`` or ``"process"``) and a flag indicating
-            whether the workload is CPU intensive.
+    Checks for direct attributes matching the ConcurrencyProfile
+    protocol and an optional ``concurrency_profile`` attribute.
     """
     if obj is None:
         return None, False
+
     preferred = getattr(obj, "preferred_executor", None)
-    cpu_intensive = bool(getattr(obj, "cpu_intensive", False))
+    cpu_intensive = getattr(obj, "cpu_intensive", False)
+
     profile = getattr(obj, "concurrency_profile", None)
-    if profile is not None:
+    if profile:
         preferred = getattr(profile, "preferred_executor", preferred)
-        cpu_intensive = bool(getattr(profile, "cpu_intensive", cpu_intensive))
+        cpu_intensive = getattr(profile, "cpu_intensive", cpu_intensive)
+
     if isinstance(preferred, str):
         val = preferred.strip().lower()
         if val in {"thread", "process"}:
@@ -394,81 +299,51 @@ def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
             preferred = None
     else:
         preferred = None
-    return preferred, cpu_intensive
 
-
-def _preferred_executor_from_hints(runtime: Any | None) -> Optional[str]:
-    """Aggregate explicit concurrency hints from runtime components.
-
-
-    Sources, bytes handlers, and file extractors attached to the
-    runtime are inspected for concurrency hints. CPU-heavy components
-    bias the result toward a process executor.
-
-    Args:
-        runtime (Any | None): Runtime object holding sources, handlers,
-            and extractors.
-
-    Returns:
-        Optional[str]: Preferred executor kind (``"thread"`` or
-            ``"process"``) if one can be determined, otherwise None.
-    """
-    if runtime is None:
-        return None
-    preferred: Optional[str] = None
-    cpu_heavy = False
-
-    def _update(pref: Optional[str], cpu: bool) -> None:
-        nonlocal preferred, cpu_heavy
-        if cpu:
-            cpu_heavy = True
-        if pref == "process":
-            preferred = "process"
-        elif pref == "thread" and preferred is None:
-            preferred = "thread"
-
-    src_seq = getattr(runtime, "sources", None) or getattr(getattr(runtime, "runtime", None), "sources", None)
-    if src_seq:
-        for src in src_seq:
-            pref, cpu = _extract_concurrency_hint(src)
-            _update(pref, cpu)
-    handlers = getattr(runtime, "bytes_handlers", None) or getattr(getattr(runtime, "runtime", None), "bytes_handlers", None)
-    if handlers:
-        for _sniff, handler in handlers:
-            pref, cpu = _extract_concurrency_hint(handler)
-            _update(pref, cpu)
-    extractor = getattr(runtime, "file_extractor", None) or getattr(getattr(runtime, "runtime", None), "file_extractor", None)
-    if extractor:
-        pref, cpu = _extract_concurrency_hint(extractor)
-        _update(pref, cpu)
-
-    if cpu_heavy:
-        return "process"
-    return preferred
+    return preferred, bool(cpu_intensive)
 
 
 def _infer_executor_kind(cfg: RepocapsuleConfig, runtime: Any | None = None) -> str:
-    """Infer an executor kind from configuration and runtime hints.
+    """
+    Infer executor kind by inspecting registered components for concurrency hints.
+    """
+    components: list[Any] = []
 
-    Explicit concurrency hints on runtime components take precedence
-    over heuristics based on configured sources and bytes handlers.
+    if runtime and getattr(runtime, "sources", None):
+        components.extend(runtime.sources)
+    elif getattr(cfg.sources, "sources", None):
+        components.extend(cfg.sources.sources)
 
-    Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
-        runtime (Any | None): Optional runtime object used to refine
-            the decision.
+    handler_pairs: list[tuple[Any, Any]] = list(getattr(cfg.pipeline, "bytes_handlers", ()))
+    if runtime and getattr(runtime, "bytes_handlers", None):
+        handler_pairs.extend(runtime.bytes_handlers)
+    for _, handler in handler_pairs:
+        components.append(handler)
 
-    Returns:
-        str: Inferred executor kind, either ``"thread"`` or
-            ``"process"``.
-    """    
-    hinted = _preferred_executor_from_hints(runtime)
-    if hinted in {"thread", "process"}:
-        return hinted
-    heavy_handlers = _has_heavy_binary_handlers(cfg, runtime)
-    heavy_sources = _has_heavy_sources(cfg, runtime)
-    if heavy_handlers and heavy_sources:
+    extractor = getattr(cfg.pipeline, "file_extractor", None)
+    if extractor:
+        components.append(extractor)
+    if runtime and getattr(runtime, "file_extractor", None):
+        components.append(runtime.file_extractor)
+
+    cpu_bound_votes = 0
+    forced_kind: Optional[str] = None
+
+    for obj in components:
+        pref, cpu = _extract_concurrency_hint(obj)
+        if cpu:
+            cpu_bound_votes += 1
+        if pref == "process":
+            forced_kind = "process"
+        elif pref == "thread" and forced_kind is None:
+            forced_kind = "thread"
+
+    if forced_kind:
+        return forced_kind
+
+    if cpu_bound_votes > 0:
         return "process"
+
     return "thread"
 
 

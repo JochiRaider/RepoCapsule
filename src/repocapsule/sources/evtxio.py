@@ -317,6 +317,10 @@ def handle_evtx(
                 }),
             )
 
+
+handle_evtx.cpu_intensive = True
+handle_evtx.preferred_executor = "process"
+
 # Register default bytes handler
 try:
     from ..core.registries import bytes_handler_registry

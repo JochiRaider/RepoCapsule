@@ -55,6 +55,10 @@ def handle_pdf(
     )
 
 
+handle_pdf.cpu_intensive = True
+handle_pdf.preferred_executor = "process"
+
+
 
 def _iso8601(v: Any) -> str | None:
     """Formats pypdf date-like fields into ISO-8601 when possible.

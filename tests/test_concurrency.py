@@ -3,7 +3,8 @@ import time
 
 import pytest
 
-from repocapsule.core.concurrency import Executor, ExecutorConfig, process_items_parallel
+from repocapsule.core.config import RepocapsuleConfig
+from repocapsule.core.concurrency import Executor, ExecutorConfig, infer_executor_kind, process_items_parallel
 
 
 def _process_one_echo(item):
@@ -173,3 +174,16 @@ def test_map_unordered_respects_window_backpressure():
     t.join(timeout=5)
     assert len(submitted) == 4
     assert set(results) == {1, 2, 3, 4}
+
+
+def test_infer_executor_respects_attributes():
+    def dummy_heavy_handler(data, path, ctx, pol):  # pragma: no cover - exercised via inference
+        return []
+
+    dummy_heavy_handler.cpu_intensive = True
+
+    cfg = RepocapsuleConfig()
+    cfg.pipeline.bytes_handlers = [(None, dummy_heavy_handler)]
+
+    kind = infer_executor_kind(cfg)
+    assert kind == "process"
