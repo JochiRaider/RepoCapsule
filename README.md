@@ -637,7 +637,7 @@ Use this when:
 
 ## Limitations & roadmap
 - Extras required for certain formats/features: `[pdf]`, `[evtx]`, `[parquet]`, `[tok]`, `[qc]`. Without them, handlers are skipped or fall back to plain text.
-- `repocapsule-qc` entry point is declared but no dedicated CLI module exists; use programmatic QC helpers for now.
+- `repocapsule-qc` is an alias of the main CLI; `repocapsule qc ...` requires the `[qc]` extra to be installed.
 - Token counts fall back to heuristic estimates when `tiktoken` is absent.
 - Executor selection is heuristic; extremely large PDFs/EVTX workloads may need manual tuning of `pipeline.executor_kind`/`max_workers`.
 - Future work: richer source types, additional sinks/handlers, stronger QC CLI, and expanded dataset card automation.

@@ -56,7 +56,7 @@ mypy --config-file pyproject.toml src
   - CLI and runner helpers: `src/repocapsule/cli/`
   - Public package surface: `src/repocapsule/__init__.py`
   - Source/sink implementations: `src/repocapsule/sources/`, `src/repocapsule/sinks/`
-  - Extras (optional modules): `src/repocapsule/core/extras/`, `src/repocapsule/extras/`
+  - Extras (optional modules): `src/repocapsule/core/extras/`
   - Tests: `tests/`
 
 ### Golden "spine" modules

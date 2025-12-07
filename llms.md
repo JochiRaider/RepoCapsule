@@ -96,7 +96,7 @@ These are treated as the “core” of the system.
   Logging configuration helpers, package logger setup, and temporary level context manager.
 
 * `registries.py`
-  Registries for sources, sinks, bytes handlers, quality scorers, and safety scorers; central place to register built-ins and plugins.
+  Registries for sources, sinks, bytes handlers, quality scorers, safety scorers, and lifecycle hooks; central place to register built-ins and plugins, with `RegistryBundle` helpers for passing registry sets into the builder or plugin loader.
 
 * `plugins.py`
   Plugin discovery and registration helpers (entry-point based), wiring external sources/sinks/scorers into the registries.
@@ -105,7 +105,7 @@ These are treated as the “core” of the system.
   Helpers to generate per-shard configs with isolated outputs from a base config + target list.
 
 * `stats_aggregate.py`
-  Utilities to merge multiple `PipelineStats.as_dict()` outputs (counts/flags only) for distributed runs.
+  Utilities to merge multiple `PipelineStats.as_dict()` outputs (counts/flags only) for distributed runs; validates QC config consistency and clears non-additive QC fields like `signal_stats` and `top_dup_families`.
 
 * `interfaces.py`
   Protocols/typed interfaces shared across the system (sources, sinks, lifecycle hooks, quality/safety scorers, etc.), plus core type aliases.
@@ -279,11 +279,14 @@ Pytest-based test suite validating core behavior and non-core wiring.
 * `tests/test_config_builder_pipeline.py`
   End-to-end tests tying together config parsing, builder wiring, and pipeline execution.
 
-* `tests/test_pipeline_middlewares.py`
-  Focused tests for `PipelineEngine` middleware behavior (record/file middleware adapters, QC hooks) and basic sink error handling. Middleware-related override wiring should be covered here when adding new behavior to `PipelineOverrides` or `build_engine`.
+* `tests/test_config_merge_helper.py`
+  Tests the config/options merge helper (`build_config_from_defaults_and_options`) used by factories.
 
 * `tests/test_convert.py`
   Tests for `convert.py` helpers (decode + chunk → records) and mode/format detection.
+
+* `tests/test_convert_integration.py`
+  Integration tests covering decode → chunk → record flows under representative configs.
 
 * `tests/test_dataset_card.py`
   Tests dataset card generation and rendering behavior.
@@ -291,11 +294,23 @@ Pytest-based test suite validating core behavior and non-core wiring.
 * `tests/test_decode.py`
   Tests for byte decoding, encoding detection, and normalization rules.
 
+* `tests/test_decode_fallback.py`
+  Tests fallback decode heuristics/codecs when preferred paths are unavailable.
+
+* `tests/test_dedup_store.py`
+  Tests deduplication store schema/metadata enforcement and LSH lookups.
+
+* `tests/test_factories_sources_config_overlays.py`
+  Tests source config overlay behavior (defaults vs per-spec options).
+
+* `tests/test_hooks.py`
+  Tests lifecycle hook wiring and behavior.
+
 * `tests/test_log_and_naming.py`
   Tests for logging helpers and naming utilities (`naming.py`).
 
 * `tests/test_pipeline_middlewares.py`
-  Tests for pipeline middleware / hooks behavior and integration.
+  Focused tests for `PipelineEngine` middleware behavior (record/file middleware adapters, QC hooks) and basic sink error handling. Middleware-related override wiring should be covered here when adding new behavior to `PipelineOverrides` or `build_engine`.
 
 * `tests/test_plugins_and_registries.py`
   Tests plugin discovery and registry behavior for sources, sinks, and scorers.
@@ -306,6 +321,21 @@ Pytest-based test suite validating core behavior and non-core wiring.
 * `tests/test_qc_defaults.py`
   Tests default QC configuration and behavior (e.g., default scorers, thresholds).
 
+* `tests/test_qc_integration.py`
+  Integration tests that run QC wiring end-to-end through the pipeline.
+
+* `tests/test_qc_post.py`
+  Tests post-hoc QC driver behavior (`PostQCHook`, `run_qc_over_jsonl`).
+
+* `tests/test_qc_safety_modes.py`
+  Tests safety scorer modes (inline/advisory) and their interaction with QC and summary stats.
+
+* `tests/test_qc_simhash_optimization.py`
+  Tests QC SimHash/MinHash optimization and dedup behaviors.
+
+* `tests/test_qc_utils.py`
+  Tests low-level QC utilities (similarity hashing, duplicate detection, heuristics).
+
 * `tests/test_records.py`
   Tests record construction, metadata propagation, and header generation.
 
@@ -314,6 +344,21 @@ Pytest-based test suite validating core behavior and non-core wiring.
 
 * `tests/test_safe_http.py`
   Tests `safe_http.py` HTTP client behavior, redirect/IP safety, and global client helpers.
+
+* `tests/test_schema_validation.py`
+  Tests config/schema validation behavior.
+
+* `tests/test_sharding.py`
+  Tests sharding helpers and config splitting logic.
+
+* `tests/test_sqlite_source_security.py`
+  Tests SQLite source download/allowlist safeguards and security constraints.
+
+* `tests/test_sqlite_source_validation.py`
+  Tests SQLite source validation rules.
+
+* `tests/test_stats_aggregate.py`
+  Tests stats aggregation behavior.
 
 ---
 

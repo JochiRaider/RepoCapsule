@@ -10,8 +10,10 @@ For rules, invariants, and AI usage guidelines, see `agents.md`.
 .
 ├── .gitattributes
 ├── .gitignore
+├── LICENSE
 ├── README.md
 ├── agents.md
+├── core_upload.md
 ├── example_config.toml
 ├── llms.md
 ├── manual_test_github.toml
@@ -24,65 +26,72 @@ For rules, invariants, and AI usage guidelines, see `agents.md`.
 │   ├── manual_test_web_pdf.py
 │   └── seed_dedup_db.py
 ├── src
-│   └── repocapsule
-│       ├── __init__.py
-│       ├── cli
-│       │   ├── __init__.py
-│       │   ├── main.py
-│       │   └── runner.py
-│       ├── core
-│       │   ├── __init__.py
-│       │   ├── builder.py
-│       │   ├── chunk.py
-│       │   ├── concurrency.py
-│       │   ├── config.py
-│       │   ├── convert.py
-│       │   ├── dataset_card.py
-│       │   ├── decode.py
-│       │   ├── dedup_store.py
-│       │   ├── extras
-│       │   │   ├── __init__.py
-│       │   │   ├── langid_lingua.py
-│       │   │   ├── langid_pygments.py
-│       │   │   ├── md_kql.py
-│       │   │   ├── qc.py
-│       │   │   └── safety.py
-│       │   ├── factories.py
-│       │   ├── factories_context.py
-│       │   ├── factories_qc.py
-│       │   ├── factories_sinks.py
-│       │   ├── factories_sources.py
-│       │   ├── hooks.py
-│       │   ├── interfaces.py
-│       │   ├── language_id.py
-│       │   ├── licenses.py
-│       │   ├── log.py
-│       │   ├── naming.py
-│       │   ├── pipeline.py
-│       │   ├── plugins.py
-│       │   ├── qc_controller.py
-│       │   ├── qc_post.py
-│       │   ├── qc_utils.py
-│       │   ├── records.py
-│       │   ├── registries.py
-│       │   ├── sharding.py
-│       │   ├── stats_aggregate.py
-│       │   └── safe_http.py
-│       ├── sinks
-│       │   ├── __init__.py
-│       │   ├── parquet.py
-│       │   └── sinks.py
-│       └── sources
-│           ├── __init__.py
-│           ├── csv_source.py
-│           ├── evtxio.py
-│           ├── fs.py
-│           ├── githubio.py
-│           ├── jsonl_source.py
-│           ├── parquetio.py
-│           ├── pdfio.py
-│           ├── sources_webpdf.py
-│           └── sqlite_source.py
+│   ├── repocapsule
+│   │   ├── __init__.py
+│   │   ├── cli
+│   │   │   ├── __init__.py
+│   │   │   ├── main.py
+│   │   │   └── runner.py
+│   │   ├── core
+│   │   │   ├── __init__.py
+│   │   │   ├── builder.py
+│   │   │   ├── chunk.py
+│   │   │   ├── concurrency.py
+│   │   │   ├── config.py
+│   │   │   ├── convert.py
+│   │   │   ├── dataset_card.py
+│   │   │   ├── decode.py
+│   │   │   ├── dedup_store.py
+│   │   │   ├── extras
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── langid_lingua.py
+│   │   │   │   ├── langid_pygments.py
+│   │   │   │   ├── md_kql.py
+│   │   │   │   ├── qc.py
+│   │   │   │   └── safety.py
+│   │   │   ├── factories.py
+│   │   │   ├── factories_context.py
+│   │   │   ├── factories_qc.py
+│   │   │   ├── factories_sinks.py
+│   │   │   ├── factories_sources.py
+│   │   │   ├── hooks.py
+│   │   │   ├── interfaces.py
+│   │   │   ├── language_id.py
+│   │   │   ├── licenses.py
+│   │   │   ├── log.py
+│   │   │   ├── naming.py
+│   │   │   ├── pipeline.py
+│   │   │   ├── plugins.py
+│   │   │   ├── qc_controller.py
+│   │   │   ├── qc_post.py
+│   │   │   ├── qc_utils.py
+│   │   │   ├── records.py
+│   │   │   ├── registries.py
+│   │   │   ├── safe_http.py
+│   │   │   ├── sharding.py
+│   │   │   └── stats_aggregate.py
+│   │   ├── sinks
+│   │   │   ├── __init__.py
+│   │   │   ├── parquet.py
+│   │   │   └── sinks.py
+│   │   └── sources
+│   │       ├── __init__.py
+│   │       ├── csv_source.py
+│   │       ├── evtxio.py
+│   │       ├── fs.py
+│   │       ├── githubio.py
+│   │       ├── jsonl_source.py
+│   │       ├── parquetio.py
+│   │       ├── pdfio.py
+│   │       ├── sources_webpdf.py
+│   │       └── sqlite_source.py
+│   └── repocapsule.egg-info
+│       ├── PKG-INFO
+│       ├── SOURCES.txt
+│       ├── dependency_links.txt
+│       ├── entry_points.txt
+│       ├── requires.txt
+│       └── top_level.txt
 └── tests
     ├── conftest.py
     ├── test_builder_runtime_layering.py
@@ -90,10 +99,14 @@ For rules, invariants, and AI usage guidelines, see `agents.md`.
     ├── test_cli_main.py
     ├── test_concurrency.py
     ├── test_config_builder_pipeline.py
+    ├── test_config_merge_helper.py
     ├── test_convert.py
+    ├── test_convert_integration.py
     ├── test_dataset_card.py
     ├── test_decode.py
+    ├── test_decode_fallback.py
     ├── test_dedup_store.py
+    ├── test_factories_sources_config_overlays.py
     ├── test_hooks.py
     ├── test_log_and_naming.py
     ├── test_pipeline_middlewares.py
@@ -102,10 +115,15 @@ For rules, invariants, and AI usage guidelines, see `agents.md`.
     ├── test_qc_defaults.py
     ├── test_qc_integration.py
     ├── test_qc_post.py
-    ├── test_schema_validation.py
-    ├── test_sharding.py
-    ├── test_stats_aggregate.py
+    ├── test_qc_safety_modes.py
+    ├── test_qc_simhash_optimization.py
+    ├── test_qc_utils.py
     ├── test_records.py
     ├── test_runner_finalizers.py
-    └── test_safe_http.py
+    ├── test_safe_http.py
+    ├── test_schema_validation.py
+    ├── test_sharding.py
+    ├── test_sqlite_source_security.py
+    ├── test_sqlite_source_validation.py
+    └── test_stats_aggregate.py
 ```
