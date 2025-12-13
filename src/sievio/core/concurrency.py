@@ -1,6 +1,6 @@
 # concurrency.py
 # SPDX-License-Identifier: MIT
-"""Concurrency helpers and executor configuration for RepoCapsule.
+"""Concurrency helpers and executor configuration for Sievio.
 
 Wraps thread and process pool executors with a bounded submission
 window and provides helpers to infer executor settings for the main
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Literal, Tuple, TypeVar, Optional
 import os
 
-from .config import RepocapsuleConfig
+from .config import SievioConfig
 from .log import get_logger
 
 log = get_logger(__name__)
@@ -303,22 +303,57 @@ def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
     return preferred, bool(cpu_intensive)
 
 
-def _infer_executor_kind(cfg: RepocapsuleConfig, runtime: Any | None = None) -> str:
+def _component_token(obj: Any) -> str:
+    """Return a normalized identifier string for heuristic checks."""
+    try:
+        name = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or ""
+    except Exception:
+        name = ""
+    if not name:
+        try:
+            name = obj.__class__.__name__
+        except Exception:
+            name = ""
+    try:
+        mod = getattr(obj, "__module__", "") or ""
+    except Exception:
+        mod = ""
+    return f"{mod}.{name}".lower()
+
+
+def _looks_heavy_bytes_handler(obj: Any) -> bool:
+    """Heuristic to detect CPU-heavy bytes handlers (e.g., PDF/EVTX)."""
+    token = _component_token(obj)
+    return any(key in token for key in ("pdf", "evtx"))
+
+
+def _looks_heavy_source(obj: Any) -> bool:
+    """Heuristic to detect sources that imply heavy bytes handling."""
+    token = _component_token(obj)
+    return any(key in token for key in ("pdf", "evtx"))
+
+
+def _infer_executor_kind(cfg: SievioConfig, runtime: Any | None = None) -> str:
     """
     Infer executor kind by inspecting registered components for concurrency hints.
     """
     components: list[Any] = []
+    has_heavy_source = False
+    has_heavy_handler = False
 
     if runtime and getattr(runtime, "sources", None):
         components.extend(runtime.sources)
+        has_heavy_source = any(_looks_heavy_source(src) for src in runtime.sources)
     elif getattr(cfg.sources, "sources", None):
         components.extend(cfg.sources.sources)
+        has_heavy_source = any(_looks_heavy_source(src) for src in cfg.sources.sources)
 
     handler_pairs: list[tuple[Any, Any]] = list(getattr(cfg.pipeline, "bytes_handlers", ()))
     if runtime and getattr(runtime, "bytes_handlers", None):
         handler_pairs.extend(runtime.bytes_handlers)
     for _, handler in handler_pairs:
         components.append(handler)
+        has_heavy_handler = has_heavy_handler or _looks_heavy_bytes_handler(handler)
 
     extractor = getattr(cfg.pipeline, "file_extractor", None)
     if extractor:
@@ -344,10 +379,13 @@ def _infer_executor_kind(cfg: RepocapsuleConfig, runtime: Any | None = None) -> 
     if cpu_bound_votes > 0:
         return "process"
 
+    if has_heavy_source and has_heavy_handler:
+        return "process"
+
     return "thread"
 
 
-def infer_executor_kind(cfg: RepocapsuleConfig, *, default: str = "thread", runtime: Any | None = None) -> Literal["thread", "process"]:
+def infer_executor_kind(cfg: SievioConfig, *, default: str = "thread", runtime: Any | None = None) -> Literal["thread", "process"]:
     """Return a validated executor kind for the pipeline.
 
 
@@ -355,7 +393,7 @@ def infer_executor_kind(cfg: RepocapsuleConfig, *, default: str = "thread", runt
     default when the heuristics cannot determine a valid kind.
 
     Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
+        cfg (SievioConfig): Top-level configuration object.
         default (str): Fallback executor kind to use when inference
             fails or returns an unknown value.
         runtime (Any | None): Optional runtime object used to refine
@@ -371,7 +409,7 @@ def infer_executor_kind(cfg: RepocapsuleConfig, *, default: str = "thread", runt
     return kind  # type: ignore[return-value]
 
 
-def resolve_pipeline_executor_config(cfg: RepocapsuleConfig, runtime: Any | None = None) -> tuple[ExecutorConfig, bool]:
+def resolve_pipeline_executor_config(cfg: SievioConfig, runtime: Any | None = None) -> tuple[ExecutorConfig, bool]:
     """Build executor settings for the main ingestion pipeline.
 
     The pipeline section of the configuration controls the maximum
@@ -380,7 +418,7 @@ def resolve_pipeline_executor_config(cfg: RepocapsuleConfig, runtime: Any | None
     is inferred from the configured sources and bytes handlers.
 
     Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
+        cfg (SievioConfig): Top-level configuration object.
         runtime (Any | None): Optional runtime object whose components
             may influence executor inference.
 
@@ -404,7 +442,7 @@ def resolve_pipeline_executor_config(cfg: RepocapsuleConfig, runtime: Any | None
     return exec_cfg, fail_fast
 
 
-def resolve_qc_executor_config(cfg: RepocapsuleConfig, runtime: Any | None = None) -> ExecutorConfig:
+def resolve_qc_executor_config(cfg: SievioConfig, runtime: Any | None = None) -> ExecutorConfig:
     """Build executor settings for post-extraction QC scoring.
 
 
@@ -414,7 +452,7 @@ def resolve_qc_executor_config(cfg: RepocapsuleConfig, runtime: Any | None = Non
     are resolved using the same heuristics as the main pipeline.
 
     Args:
-        cfg (RepocapsuleConfig): Top-level configuration object.
+        cfg (SievioConfig): Top-level configuration object.
         runtime (Any | None): Optional runtime object whose components
             may influence executor inference.
 

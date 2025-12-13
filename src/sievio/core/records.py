@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple, TYPE_CHECKING, TypedDict, NotRequired, cast
 import hashlib
+import logging
 
 from .chunk import count_tokens
 from .language_id import (
@@ -231,19 +232,34 @@ def check_record_schema(record: Mapping[str, Any], logger: Any | None = None) ->
     version = meta.get("schema_version")
     logger_obj = logger or log
 
+    def _propagates_to_root(lgr: logging.Logger) -> bool:
+        current = lgr
+        while current:
+            if current.propagate is False and current.parent is not None:
+                return False
+            current = current.parent
+        return True
+
+    def _emit(level: int, msg: str, *args: Any) -> None:
+        logger_obj.log(level, msg, *args)
+        if logger is None and not _propagates_to_root(logger_obj):
+            logging.getLogger().log(level, msg, *args)
+
     if version is None:
-        logger_obj.debug("Record missing schema_version; treating as legacy schema.")
+        _emit(logging.DEBUG, "Record missing schema_version; treating as legacy schema.")
         return
 
     version_str = str(version)
     if version_str > RECORD_META_SCHEMA_VERSION:
-        logger_obj.warning(
+        _emit(
+            logging.WARNING,
             "Record schema_version %s is newer than library schema_version %s; ensure compatibility before scoring.",
             version_str,
             RECORD_META_SCHEMA_VERSION,
         )
     elif version_str < RECORD_META_SCHEMA_VERSION:
-        logger_obj.debug(
+        _emit(
+            logging.DEBUG,
             "Record schema_version %s is older than library schema_version %s; proceeding with backward compatibility.",
             version_str,
             RECORD_META_SCHEMA_VERSION,
@@ -600,10 +616,10 @@ def build_record(
 # -----------------------
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .config import RepocapsuleConfig
+    from .config import SievioConfig
 
 
-def build_run_header_record(config: "RepocapsuleConfig") -> Dict[str, Any]:
+def build_run_header_record(config: "SievioConfig") -> Dict[str, Any]:
     """Build a run_header record describing configuration at run start."""
 
     meta = RunHeaderMeta(

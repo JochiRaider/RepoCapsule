@@ -412,6 +412,11 @@ class QCSummaryTracker:
         if not summary or not replace_screeners:
             return
         other = QCSummaryTracker.from_summary_dict(summary)
+        # Carry over top-level flags so callers get accurate enabled/mode metadata.
+        self.enabled = self.enabled or other.enabled
+        self.mode = other.mode or self.mode
+        self.min_score = other.min_score if other.min_score is not None else self.min_score
+        self.drop_near_dups = self.drop_near_dups or other.drop_near_dups
         for screener_id in replace_screeners:
             incoming = other.screeners.get(screener_id)
             if incoming is None:
@@ -647,6 +652,15 @@ class InlineScreeningController:
         self._qc_cfg = qc_cfg
         self._safety_cfg = safety_cfg
         self._sync_screeners()
+
+    @property
+    def cfg(self) -> QCConfig | None:
+        """Expose the current QCConfig for downstream helpers (CSV/post-QC)."""
+        return self._qc_cfg
+
+    @cfg.setter
+    def cfg(self, value: QCConfig | None) -> None:
+        self._qc_cfg = value
 
     @property
     def tracker(self) -> QCSummaryTracker:
