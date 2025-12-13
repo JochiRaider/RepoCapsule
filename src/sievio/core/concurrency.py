@@ -303,22 +303,57 @@ def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
     return preferred, bool(cpu_intensive)
 
 
+def _component_token(obj: Any) -> str:
+    """Return a normalized identifier string for heuristic checks."""
+    try:
+        name = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None) or ""
+    except Exception:
+        name = ""
+    if not name:
+        try:
+            name = obj.__class__.__name__
+        except Exception:
+            name = ""
+    try:
+        mod = getattr(obj, "__module__", "") or ""
+    except Exception:
+        mod = ""
+    return f"{mod}.{name}".lower()
+
+
+def _looks_heavy_bytes_handler(obj: Any) -> bool:
+    """Heuristic to detect CPU-heavy bytes handlers (e.g., PDF/EVTX)."""
+    token = _component_token(obj)
+    return any(key in token for key in ("pdf", "evtx"))
+
+
+def _looks_heavy_source(obj: Any) -> bool:
+    """Heuristic to detect sources that imply heavy bytes handling."""
+    token = _component_token(obj)
+    return any(key in token for key in ("pdf", "evtx"))
+
+
 def _infer_executor_kind(cfg: SievioConfig, runtime: Any | None = None) -> str:
     """
     Infer executor kind by inspecting registered components for concurrency hints.
     """
     components: list[Any] = []
+    has_heavy_source = False
+    has_heavy_handler = False
 
     if runtime and getattr(runtime, "sources", None):
         components.extend(runtime.sources)
+        has_heavy_source = any(_looks_heavy_source(src) for src in runtime.sources)
     elif getattr(cfg.sources, "sources", None):
         components.extend(cfg.sources.sources)
+        has_heavy_source = any(_looks_heavy_source(src) for src in cfg.sources.sources)
 
     handler_pairs: list[tuple[Any, Any]] = list(getattr(cfg.pipeline, "bytes_handlers", ()))
     if runtime and getattr(runtime, "bytes_handlers", None):
         handler_pairs.extend(runtime.bytes_handlers)
     for _, handler in handler_pairs:
         components.append(handler)
+        has_heavy_handler = has_heavy_handler or _looks_heavy_bytes_handler(handler)
 
     extractor = getattr(cfg.pipeline, "file_extractor", None)
     if extractor:
@@ -342,6 +377,9 @@ def _infer_executor_kind(cfg: SievioConfig, runtime: Any | None = None) -> str:
         return forced_kind
 
     if cpu_bound_votes > 0:
+        return "process"
+
+    if has_heavy_source and has_heavy_handler:
         return "process"
 
     return "thread"
