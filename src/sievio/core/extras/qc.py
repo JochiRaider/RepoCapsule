@@ -435,11 +435,14 @@ class JSONLQualityScorer:
             executor_hint=None,
             tracker=tracker,
         )
+        quality_stats = tracker.get_screener("quality", create=False)
+        scored_count = quality_stats.scored if quality_stats else 0
+        error_count = quality_stats.errors if quality_stats else 0
         stats = JSONLScoreStats(
-            total_lines=tracker.scored + tracker.errors,
-            parsed_ok=tracker.scored,
-            scored_ok=tracker.scored,
-            parse_errors=tracker.errors,
+            total_lines=scored_count + error_count,
+            parsed_ok=scored_count,
+            scored_ok=scored_count,
+            parse_errors=error_count,
             score_errors=0,
             error_examples=[],
         )
@@ -563,11 +566,14 @@ def score_jsonl_to_csv(
         write_csv=True,
         csv_suffix=out_csv,
     )
+    quality_summary = (summary.get("screeners") or {}).get("quality", {}) if isinstance(summary, Mapping) else {}
+    scored_val = int(quality_summary.get("scored", 0) or 0)
+    error_val = int(quality_summary.get("errors", 0) or 0)
     stats = JSONLScoreStats(
-        total_lines=int(summary.get("scored", 0) or 0) + int(summary.get("errors", 0) or 0),
-        parsed_ok=int(summary.get("scored", 0) or 0),
-        scored_ok=int(summary.get("scored", 0) or 0),
-        parse_errors=int(summary.get("errors", 0) or 0),
+        total_lines=scored_val + error_val,
+        parsed_ok=scored_val,
+        scored_ok=scored_val,
+        parse_errors=error_val,
         score_errors=0,
         error_examples=[],
     )

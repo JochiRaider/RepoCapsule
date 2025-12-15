@@ -105,7 +105,7 @@ These are treated as the “core” of the system.
   Helpers to generate per-shard configs with isolated outputs from a base config + target list.
 
 * `stats_aggregate.py`
-  Utilities to merge multiple `PipelineStats.as_dict()` outputs (counts/flags only) for distributed runs; validates QC config consistency and clears non-additive QC fields like `signal_stats` and `top_dup_families`.
+  Utilities to merge multiple `PipelineStats.as_dict()` outputs (counts/flags only) for distributed runs; validates QC config consistency and clears non-additive QC fields like per-screener `signal_stats` and `top_dup_families`.
 
 * `interfaces.py`
   Protocols/typed interfaces shared across the system (sources, sinks, lifecycle hooks, quality/safety scorers, etc.), plus core type aliases.
@@ -126,7 +126,7 @@ These are treated as the “core” of the system.
   Low-level quality-control utilities (similarity hashing, duplicate detection, basic QC heuristics and summaries).
 
 * `qc_controller.py`
-  Inline screening controller and related helpers for advisory/inline gating during the main pipeline run (e.g., `InlineQCHook`), coordinating both quality and safety screeners with record-level scorers (`score_record`) only. Hosts `QualitySignals`/`filter_qc_meta` and `QCSummaryTracker.signal_stats` for schema-aligned QC signals (len_tok, ascii_ratio, repetition, gopher_quality, etc.). Safety gating is driven by `SafetyConfig.mode` + `annotate_only` (independent of QC mode) and can run without QC; POST safety is handled by a separate hook/driver after the pipeline completes.
+  Inline screening controller and related helpers for advisory/inline gating during the main pipeline run (e.g., `InlineQCHook`), coordinating both quality and safety screeners with record-level scorers (`score_record`) only. Hosts `QualitySignals`/`filter_qc_meta` and per-screener signal stats (quality `screeners["quality"]["signal_stats"]`) for schema-aligned QC signals (len_tok, ascii_ratio, repetition, gopher_quality, etc.). Safety gating is driven by `SafetyConfig.mode` + `annotate_only` (independent of QC mode) and can run without QC; POST safety is handled by a separate hook/driver after the pipeline completes.
 
 * `qc_post.py`
   Post-hoc screening lifecycle hooks and reusable JSONL drivers (`run_qc_over_jsonl`, `run_safety_over_jsonl`, `iter/collect_qc_rows_from_jsonl`) for scoring or CSV export after the main run completes, including optional QC/safety signal sidecars (CSV or Parquet). `QCMode.POST` enforces gates only in this pass; POST safety evaluates decisions and updates summaries but does not rewrite the primary JSONL. If you are changing QC/safety export/sidecar behavior or running QC/safety as a separate pass over JSONL, start here instead of modifying sinks.

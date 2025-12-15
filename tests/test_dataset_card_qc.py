@@ -8,8 +8,12 @@ def test_aggregate_signal_stats_qc_summary_shape():
         extra={
             "stats": {
                 "qc_summary": {
-                    "signal_stats": {
-                        "foo": {"count": 2, "mean": 1.0, "min": 1.0, "max": 1.0, "stdev": 0.0},
+                    "screeners": {
+                        "quality": {
+                            "signal_stats": {
+                                "foo": {"count": 2, "mean": 1.0, "min": 1.0, "max": 1.0, "stdev": 0.0},
+                            }
+                        }
                     }
                 }
             }
@@ -30,8 +34,12 @@ def test_aggregate_signal_stats_pipeline_shape():
         extra={
             "stats": {
                 "qc": {
-                    "signal_stats": {
-                        "foo": {"count": 2, "mean": 1.0, "min": 1.0, "max": 1.0, "stdev": 0.0},
+                    "screeners": {
+                        "quality": {
+                            "signal_stats": {
+                                "foo": {"count": 2, "mean": 1.0, "min": 1.0, "max": 1.0, "stdev": 0.0},
+                            }
+                        }
                     }
                 }
             }

@@ -203,7 +203,14 @@ def run_qc_over_jsonl(
             apply_gates=False,
             enabled=bool(qc_cfg.enabled),
         )
-        summary["errors"] = tracker.errors
+        tracker_quality = tracker.get_screener("quality", create=False)
+        if tracker_quality is not None:
+            screeners_payload = summary.setdefault("screeners", {})
+            quality_payload = screeners_payload.get("quality") or {}
+            if isinstance(quality_payload, Mapping):
+                quality_payload = dict(quality_payload)
+            quality_payload["errors"] = tracker_quality.errors
+            screeners_payload["quality"] = quality_payload
         rows_result = rows
         out_csv = _derive_csv_path(jsonl_path, csv_suffix if csv_suffix is not None else qc_cfg.csv_suffix)
         if should_write_csv and out_csv:
@@ -882,12 +889,19 @@ def _score_safety_lines(
 
 
 def _log_post_qc_summary(summary: Dict[str, Any]) -> None:
+    screeners = summary.get("screeners") if isinstance(summary, Mapping) else None
+    quality = screeners.get("quality") if isinstance(screeners, Mapping) else {}
+    quality_payload = quality if isinstance(quality, Mapping) else {}
+    candidates = quality_payload.get("candidates") if isinstance(quality_payload, Mapping) else {}
+    scored_val = int(quality_payload.get("scored", 0) or 0)
+    cand_low = int((candidates or {}).get("low_score", 0) or 0)
+    cand_near_dup = int((candidates or {}).get("near_dup", 0) or 0)
     log.info(
         "Post-QC summary (mode=%s, scored=%d, candidates_low_score=%d, candidates_near_dup=%d)",
         summary.get("mode"),
-        summary.get("scored"),
-        summary.get("candidates_low_score"),
-        summary.get("candidates_near_dup"),
+        scored_val,
+        cand_low,
+        cand_near_dup,
     )
     top = summary.get("top_dup_families") or []
     if top:
@@ -1214,15 +1228,17 @@ def emit_safety_signals_parquet(
 
 
 def _log_post_safety_summary(summary: Dict[str, Any]) -> None:
-    safety = summary.get("safety") or {}
+    screeners = summary.get("screeners") if isinstance(summary, Mapping) else None
+    safety = screeners.get("safety") if isinstance(screeners, Mapping) else {}
+    safety_payload = safety if isinstance(safety, Mapping) else {}
     log.info(
         "Post-safety summary (mode=%s, scored=%s, dropped=%s, errors=%s)",
-        safety.get("mode") or summary.get("mode"),
-        safety.get("scored"),
-        safety.get("dropped"),
-        safety.get("errors"),
+        safety_payload.get("mode") or summary.get("mode"),
+        int(safety_payload.get("scored", 0) or 0),
+        int(safety_payload.get("dropped", 0) or 0),
+        int(safety_payload.get("errors", 0) or 0),
     )
-    flags = safety.get("flags") or {}
+    flags = safety_payload.get("flags") or {}
     if flags:
         lines = [f"    - {name}: {count}" for name, count in flags.items()]
         log.info("Safety flags:\n%s", "\n".join(lines))

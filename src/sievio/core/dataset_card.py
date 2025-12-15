@@ -350,7 +350,7 @@ def _coerce_numeric(value: Any) -> float | None:
 def _aggregate_signal_stats(fragments: Sequence["CardFragment"]) -> dict[str, dict[str, Any]] | None:
     """Aggregate scalar quality signals for the dataset card.
 
-    Source: qc_summary['signal_stats'] (quality only). Safety/other screeners are
+    Source: qc_summary['screeners']['quality']['signal_stats'] (quality only). Safety/other screeners are
     summarized separately (counts/flags), not as scalar signals.
     """
     merged: dict[str, dict[str, Any]] = {}

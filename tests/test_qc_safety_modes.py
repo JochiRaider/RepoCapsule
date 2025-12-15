@@ -109,9 +109,11 @@ def test_inline_safety_without_qc_drops():
     kept = controller.process_record({"text": "x", "meta": {"path": "safety_only.py"}})
 
     assert kept is None
-    assert stats.qc.safety_enabled is True
-    assert stats.qc.safety_dropped == 1
-    assert stats.qc.safety_flags.get("flagged") == 1
+    safety_stats = stats.qc.get_screener("safety", create=False)
+    assert safety_stats is not None
+    assert safety_stats.enabled is True
+    assert safety_stats.dropped == 1
+    assert safety_stats.flags.get("flagged") == 1
 
 
 def test_qc_inline_safety_advisory_annotates_only():
@@ -138,7 +140,9 @@ def test_qc_inline_safety_advisory_annotates_only():
     kept = controller.process_record(record)
 
     assert kept is record
-    assert stats.qc.safety_dropped == 0
+    safety_stats = stats.qc.get_screener("safety", create=False)
+    assert safety_stats is not None
+    assert safety_stats.dropped == 0
     safety_meta = record["meta"]["extra"]["safety"]
     assert safety_meta["safety_flags"]["note"] is True
 
@@ -170,10 +174,11 @@ def test_screening_summary_includes_safety_stats():
     controller.process_record({"text": "hi", "meta": {"path": "bar.py"}})
     summary = controller.tracker.as_dict()
 
-    assert summary["safety"]["enabled"] is True
-    assert summary["safety"]["scored"] == 1
-    assert summary["safety"]["dropped"] == 1
-    assert summary["safety"]["flags"]["p1"] == 1
+    safety_summary = summary["screeners"]["safety"]
+    assert safety_summary["enabled"] is True
+    assert safety_summary["scored"] == 1
+    assert safety_summary["dropped"] == 1
+    assert safety_summary["flags"]["p1"] == 1
 
 
 def test_prepare_qc_post_mode_attaches_safety_only_inline():

@@ -21,12 +21,15 @@ from typing import Any, Callable, Dict, Iterable, Literal, Tuple, TypeVar, Optio
 import os
 
 from .config import SievioConfig
+from .interfaces import ConcurrencyProfile
 from .log import get_logger
 
 log = get_logger(__name__)
 
 T = TypeVar("T")
 R = TypeVar("R")
+_STRICT_HINT_ENV = "SIEVIO_STRICT_CONCURRENCY_HINTS"
+_MISSING = object()
 
 
 def _call_process_one(
@@ -273,6 +276,50 @@ def process_items_parallel(
     )
 
 
+def _strict_hint_mode_enabled() -> bool:
+    raw = os.getenv(_STRICT_HINT_ENV, "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _component_label(obj: Any) -> str:
+    token = _component_token(obj)
+    if token and token != ".":
+        return token
+    try:
+        return repr(obj)
+    except Exception:
+        return "<unknown>"
+
+
+def _invalid_hint(component: str, attr: str, detail: str) -> None:
+    message = f"Invalid concurrency hint on {component}: {attr} {detail}"
+    if _strict_hint_mode_enabled():
+        raise ValueError(message)
+    log.warning(message)
+
+
+def _normalize_preferred_executor(raw: Any, component: str, attr_path: str) -> Optional[str]:
+    if raw is _MISSING or raw is None:
+        return None
+    if not isinstance(raw, str):
+        _invalid_hint(component, attr_path, f"must be a string (\"thread\" or \"process\"), got {type(raw).__name__}.")
+        return None
+    val = raw.strip().lower()
+    if val in {"thread", "process"}:
+        return val
+    _invalid_hint(component, attr_path, f"must be \"thread\" or \"process\", got {raw!r}.")
+    return None
+
+
+def _normalize_cpu_intensive(raw: Any, component: str, attr_path: str) -> Optional[bool]:
+    if raw is _MISSING or raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    _invalid_hint(component, attr_path, f"must be a boolean, got {type(raw).__name__}.")
+    return None
+
+
 def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
     """
     Extract concurrency preferences from an object.
@@ -283,22 +330,45 @@ def _extract_concurrency_hint(obj: Any) -> tuple[Optional[str], bool]:
     if obj is None:
         return None, False
 
-    preferred = getattr(obj, "preferred_executor", None)
-    cpu_intensive = getattr(obj, "cpu_intensive", False)
+    component = _component_label(obj)
 
-    profile = getattr(obj, "concurrency_profile", None)
-    if profile:
-        preferred = getattr(profile, "preferred_executor", preferred)
-        cpu_intensive = getattr(profile, "cpu_intensive", cpu_intensive)
+    preferred_raw = getattr(obj, "preferred_executor", _MISSING)
+    cpu_raw = getattr(obj, "cpu_intensive", _MISSING)
+    profile_raw = getattr(obj, "concurrency_profile", _MISSING)
 
-    if isinstance(preferred, str):
-        val = preferred.strip().lower()
-        if val in {"thread", "process"}:
-            preferred = val
+    preferred = _normalize_preferred_executor(preferred_raw, component, "preferred_executor")
+    cpu_intensive = _normalize_cpu_intensive(cpu_raw, component, "cpu_intensive")
+
+    profile: ConcurrencyProfile | None = None
+    if profile_raw is not _MISSING and profile_raw is not None:
+        if isinstance(profile_raw, ConcurrencyProfile):
+            profile = profile_raw
         else:
-            preferred = None
-    else:
-        preferred = None
+            _invalid_hint(
+                component,
+                "concurrency_profile",
+                f"must satisfy ConcurrencyProfile (preferred_executor, cpu_intensive); got {type(profile_raw).__name__}.",
+            )
+
+    if profile:
+        profile_component = f"{component}.concurrency_profile"
+        preferred_from_profile = _normalize_preferred_executor(
+            getattr(profile, "preferred_executor", _MISSING),
+            profile_component,
+            "preferred_executor",
+        )
+        cpu_from_profile = _normalize_cpu_intensive(
+            getattr(profile, "cpu_intensive", _MISSING),
+            profile_component,
+            "cpu_intensive",
+        )
+        if preferred_from_profile is not None:
+            preferred = preferred_from_profile
+        if cpu_from_profile is not None:
+            cpu_intensive = cpu_from_profile
+
+    preferred = preferred if preferred in {"thread", "process"} else None
+    cpu_intensive = cpu_intensive if isinstance(cpu_intensive, bool) else False
 
     return preferred, bool(cpu_intensive)
 

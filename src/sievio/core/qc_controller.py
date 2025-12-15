@@ -172,7 +172,6 @@ class QCSummaryTracker:
         screeners: Mapping[str, ScreenerStats | Mapping[str, Any]] | None = None,
         dup_families: Mapping[str, Dict[str, Any]] | None = None,
         top_dup_snapshot: List[Dict[str, Any]] | None = None,
-        **legacy: Any,
     ) -> None:
         self.enabled = bool(enabled)
         self.mode = mode
@@ -187,7 +186,6 @@ class QCSummaryTracker:
                     self.screeners[str(sid)] = payload
                 elif isinstance(payload, Mapping):
                     self.screeners[str(sid)] = ScreenerStats.from_dict(payload, default_id=str(sid))
-        self._apply_legacy_kwargs(legacy)
 
     def reset_for_run(
         self,
@@ -207,118 +205,6 @@ class QCSummaryTracker:
         self.screeners.clear()
 
     # ------------------------------------------------------------------
-    # Legacy QC-centric views routed through per-screener stats.
-    # ------------------------------------------------------------------
-    @property
-    def scored(self) -> int:
-        return self._quality_stats().scored
-
-    @scored.setter
-    def scored(self, value: int) -> None:
-        self._quality_stats().scored = int(value or 0)
-
-    @property
-    def kept(self) -> int:
-        return self._quality_stats().kept
-
-    @kept.setter
-    def kept(self, value: int) -> None:
-        self._quality_stats().kept = int(value or 0)
-
-    @property
-    def dropped_low_score(self) -> int:
-        return self._quality_stats().drops.get("low_score", 0)
-
-    @dropped_low_score.setter
-    def dropped_low_score(self, value: int) -> None:
-        self._quality_stats().drops["low_score"] = int(value or 0)
-
-    @property
-    def dropped_near_dup(self) -> int:
-        return self._quality_stats().drops.get("near_dup", 0)
-
-    @dropped_near_dup.setter
-    def dropped_near_dup(self, value: int) -> None:
-        self._quality_stats().drops["near_dup"] = int(value or 0)
-
-    @property
-    def errors(self) -> int:
-        return self._quality_stats().errors
-
-    @errors.setter
-    def errors(self, value: int) -> None:
-        self._quality_stats().errors = int(value or 0)
-
-    @property
-    def candidates_low_score(self) -> int:
-        return self._quality_stats().candidates.get("low_score", 0)
-
-    @candidates_low_score.setter
-    def candidates_low_score(self, value: int) -> None:
-        self._quality_stats().candidates["low_score"] = int(value or 0)
-
-    @property
-    def candidates_near_dup(self) -> int:
-        return self._quality_stats().candidates.get("near_dup", 0)
-
-    @candidates_near_dup.setter
-    def candidates_near_dup(self, value: int) -> None:
-        self._quality_stats().candidates["near_dup"] = int(value or 0)
-
-    @property
-    def signal_stats(self) -> Dict[str, ScalarSignalStats]:
-        return self._quality_stats().signal_stats
-
-    @signal_stats.setter
-    def signal_stats(self, value: Mapping[str, ScalarSignalStats]) -> None:
-        self._quality_stats().signal_stats = dict(value)
-
-    @property
-    def safety_enabled(self) -> bool:
-        stats = self._safety_stats(create=False)
-        return stats.enabled if stats else False
-
-    @safety_enabled.setter
-    def safety_enabled(self, value: bool) -> None:
-        self._safety_stats().enabled = bool(value)
-
-    @property
-    def safety_scored(self) -> int:
-        stats = self._safety_stats(create=False)
-        return stats.scored if stats else 0
-
-    @safety_scored.setter
-    def safety_scored(self, value: int) -> None:
-        self._safety_stats().scored = int(value or 0)
-
-    @property
-    def safety_dropped(self) -> int:
-        stats = self._safety_stats(create=False)
-        return stats.dropped if stats else 0
-
-    @safety_dropped.setter
-    def safety_dropped(self, value: int) -> None:
-        self._safety_stats().dropped = int(value or 0)
-
-    @property
-    def safety_errors(self) -> int:
-        stats = self._safety_stats(create=False)
-        return stats.errors if stats else 0
-
-    @safety_errors.setter
-    def safety_errors(self, value: int) -> None:
-        self._safety_stats().errors = int(value or 0)
-
-    @property
-    def safety_flags(self) -> Dict[str, int]:
-        stats = self._safety_stats(create=False)
-        return stats.flags if stats else {}
-
-    @safety_flags.setter
-    def safety_flags(self, value: Mapping[str, int]) -> None:
-        self._safety_stats().flags = {str(k): int(v) for k, v in value.items()}
-
-    # ------------------------------------------------------------------
     # Observation + serialization
     # ------------------------------------------------------------------
     def observe(self, qc_result: Dict[str, Any], *, apply_gates: bool = True, screener_id: str = "quality") -> bool:
@@ -333,7 +219,7 @@ class QCSummaryTracker:
         Returns:
             bool: True when the record should be kept.
         """
-        screener = self._get_screener(screener_id, mode=self.mode if screener_id == "quality" else None)
+        screener = self.get_screener(screener_id, mode=self.mode if screener_id == "quality" else None)
         screener.enabled = True
         screener.scored += 1
         family_id = qc_result.get("dup_family_id") or qc_result.get("doc_id")
@@ -375,7 +261,7 @@ class QCSummaryTracker:
 
     def record_screener_error(self, screener_id: str) -> None:
         """Increment error count for an arbitrary screener."""
-        stats = self._get_screener(screener_id)
+        stats = self.get_screener(screener_id)
         if stats is None:
             return
         stats.enabled = True
@@ -388,22 +274,7 @@ class QCSummaryTracker:
             "mode": self.mode,
             "min_score": self.min_score,
             "drop_near_dups": bool(self.drop_near_dups),
-            "scored": int(self.scored),
-            "kept": int(self.kept),
-            "dropped_low_score": int(self.dropped_low_score),
-            "dropped_near_dup": int(self.dropped_near_dup),
-            "errors": int(self.errors),
-            "candidates_low_score": int(self.candidates_low_score),
-            "candidates_near_dup": int(self.candidates_near_dup),
             "top_dup_families": self.top_dup_families(),
-            "signal_stats": {k: s.as_dict() for k, s in self.signal_stats.items()},
-            "safety": {
-                "enabled": bool(self.safety_enabled),
-                "scored": int(self.safety_scored),
-                "dropped": int(self.safety_dropped),
-                "errors": int(self.safety_errors),
-                "flags": dict(self.safety_flags),
-            },
             "screeners": {sid: stats.as_dict() for sid, stats in self.screeners.items()},
         }
 
@@ -425,7 +296,6 @@ class QCSummaryTracker:
             if screener_id == "quality":
                 self.dup_families = dict(other.dup_families)
                 self.top_dup_snapshot = list(other.top_dup_snapshot)
-        self._apply_screeners_to_legacy_fields()
 
     def _is_low_score(self, qc_result: Dict[str, Any]) -> bool:
         """Return True when qc_result score falls below the configured min."""
@@ -468,33 +338,6 @@ class QCSummaryTracker:
                 if not isinstance(payload, Mapping):
                     continue
                 tracker.screeners[str(sid)] = ScreenerStats.from_dict(payload, default_id=str(sid))
-        tracker._apply_screeners_to_legacy_fields()
-        top = data.get("top_dup_families") or []
-        if isinstance(top, list) and not tracker.top_dup_snapshot:
-            tracker.top_dup_snapshot = [dict(entry) for entry in top if isinstance(entry, dict)]
-        signal_stats = data.get("signal_stats")
-        if isinstance(signal_stats, Mapping) and (not tracker.signal_stats):
-            tracker._merge_signal_stats_from_dict(signal_stats, screener_id="quality")
-        safety_payload = data.get("safety")
-        if isinstance(safety_payload, Mapping) and "safety" not in tracker.screeners:
-            tracker.safety_enabled = bool(safety_payload.get("enabled"))
-            tracker.safety_scored = int(safety_payload.get("scored") or 0)
-            tracker.safety_dropped = int(safety_payload.get("dropped") or 0)
-            tracker.safety_errors = int(safety_payload.get("errors") or 0)
-            flags = safety_payload.get("flags")
-            if isinstance(flags, Mapping):
-                tracker.safety_flags = {str(k): int(v) for k, v in flags.items() if v is not None}
-        tracker._apply_legacy_kwargs(
-            {
-                "scored": data.get("scored"),
-                "kept": data.get("kept"),
-                "dropped_low_score": data.get("dropped_low_score"),
-                "dropped_near_dup": data.get("dropped_near_dup"),
-                "errors": data.get("errors"),
-                "candidates_low_score": data.get("candidates_low_score"),
-                "candidates_near_dup": data.get("candidates_near_dup"),
-            }
-        )
         return tracker
 
     def _observe_signals(self, qc_result: Dict[str, Any], *, screener_id: str = "quality") -> None:
@@ -534,7 +377,7 @@ class QCSummaryTracker:
         annotate_only is handled by the controller.
         """
 
-        stats = self._get_screener(screener_id, mode=mode)
+        stats = self.get_screener(screener_id, mode=mode)
         if stats is None:
             return True
         stats.enabled = True
@@ -555,7 +398,7 @@ class QCSummaryTracker:
 
     def record_safety_error(self, *, screener_id: str = "safety", mode: str = QCMode.INLINE) -> None:
         """Increment error count for a failed safety scoring attempt."""
-        stats = self._get_screener(screener_id, mode=mode)
+        stats = self.get_screener(screener_id, mode=mode)
         if stats is None:
             return
         stats.enabled = True
@@ -564,9 +407,10 @@ class QCSummaryTracker:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _get_screener(
+    def get_screener(
         self, screener_id: str, *, mode: str | None = None, create: bool = True
     ) -> ScreenerStats | None:
+        """Return stats for a screener, optionally creating a new bucket."""
         stats = self.screeners.get(screener_id)
         if stats is None and create:
             stats = ScreenerStats(id=screener_id, mode=mode or QCMode.INLINE)
@@ -574,62 +418,18 @@ class QCSummaryTracker:
         return stats
 
     def _quality_stats(self) -> ScreenerStats:
-        return self._get_screener("quality", mode=self.mode)
+        stats = self.get_screener("quality", mode=self.mode)
+        assert stats is not None
+        return stats
 
     def _safety_stats(self, create: bool = True) -> ScreenerStats | None:
-        return self._get_screener("safety", mode=QCMode.INLINE, create=create)
+        return self.get_screener("safety", mode=QCMode.INLINE, create=create)
 
     def _increment_candidate(self, screener: ScreenerStats, key: str) -> None:
         screener.candidates[key] = screener.candidates.get(key, 0) + 1
 
     def _increment_drop(self, screener: ScreenerStats, key: str) -> None:
         screener.drops[key] = screener.drops.get(key, 0) + 1
-
-    def _merge_signal_stats_from_dict(self, payload: Mapping[str, Any], *, screener_id: str) -> None:
-        bucket = self._get_screener(screener_id).signal_stats
-        for name, stats_payload in payload.items():
-            if not isinstance(stats_payload, Mapping):
-                continue
-            bucket[str(name)] = _parse_scalar_signal_stats(stats_payload)
-
-    def _apply_legacy_kwargs(self, payload: Mapping[str, Any]) -> None:
-        if not payload:
-            return
-        if "scored" in payload and payload.get("scored") is not None:
-            self.scored = payload.get("scored") or 0
-        if "kept" in payload and payload.get("kept") is not None:
-            self.kept = payload.get("kept") or 0
-        if "dropped_low_score" in payload and payload.get("dropped_low_score") is not None:
-            self.dropped_low_score = payload.get("dropped_low_score") or 0
-        if "dropped_near_dup" in payload and payload.get("dropped_near_dup") is not None:
-            self.dropped_near_dup = payload.get("dropped_near_dup") or 0
-        if "errors" in payload and payload.get("errors") is not None:
-            self.errors = payload.get("errors") or 0
-        if "candidates_low_score" in payload and payload.get("candidates_low_score") is not None:
-            self.candidates_low_score = payload.get("candidates_low_score") or 0
-        if "candidates_near_dup" in payload and payload.get("candidates_near_dup") is not None:
-            self.candidates_near_dup = payload.get("candidates_near_dup") or 0
-
-    def _apply_screeners_to_legacy_fields(self) -> None:
-        quality = self.screeners.get("quality")
-        if quality is not None:
-            self.scored = quality.scored
-            self.kept = quality.kept
-            self.errors = quality.errors
-            self.dropped_low_score = quality.drops.get("low_score", 0)
-            self.dropped_near_dup = quality.drops.get("near_dup", 0)
-            self.candidates_low_score = quality.candidates.get("low_score", 0)
-            self.candidates_near_dup = quality.candidates.get("near_dup", 0)
-            if quality.signal_stats and not self.signal_stats:
-                self.signal_stats = quality.signal_stats
-        safety = self.screeners.get("safety")
-        if safety is not None:
-            self.safety_enabled = safety.enabled
-            self.safety_scored = safety.scored
-            self.safety_dropped = safety.dropped
-            self.safety_errors = safety.errors
-            if safety.flags:
-                self.safety_flags = safety.flags
 
 
 class InlineScreeningController:
@@ -1093,10 +893,14 @@ class InlineQCHook(RunLifecycleHook):
         )
         emit_qc_csv(rows, str(jsonl_path), out_csv)
 
-        err_count = tracker.errors
+        quality_stats = tracker.get_screener("quality", create=False)
+        err_count = quality_stats.errors if quality_stats else 0
         if err_count and hasattr(ctx, "stats"):
             try:
-                ctx.stats.qc.errors += err_count  # type: ignore[attr-defined]
+                target_stats = getattr(ctx.stats, "qc", None)
+                target_quality = target_stats.get_screener("quality") if target_stats else None  # type: ignore[attr-defined]
+                if target_quality is not None:
+                    target_quality.errors += err_count
             except Exception:
                 pass
             log.warning("Inline QC CSV scoring for %s skipped %s lines", jsonl_path, err_count)
