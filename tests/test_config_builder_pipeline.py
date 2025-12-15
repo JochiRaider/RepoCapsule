@@ -357,7 +357,9 @@ def test_overrides_end_to_end_custom_extractor_and_qc(tmp_path: Path):
     assert extractor.calls == 1
     assert scorer.calls == 1
     assert stats.records == 1
-    assert stats.qc.scored == 1
+    quality_stats = stats.qc.get_screener("quality", create=False)
+    assert quality_stats is not None
+    assert quality_stats.scored == 1
     assert has_override_record
 
 

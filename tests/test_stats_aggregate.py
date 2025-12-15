@@ -47,14 +47,19 @@ def test_merge_pipeline_stats_qc_counts_only():
                 "mode": "inline",
                 "min_score": 0.1,
                 "drop_near_dups": True,
-                "scored": 10,
-                "kept": 8,
-                "dropped_low_score": 2,
-                "dropped_near_dup": 1,
-                "errors": 0,
-                "candidates_low_score": 4,
-                "candidates_near_dup": 2,
-                "safety": {"enabled": False, "scored": 0, "dropped": 0, "errors": 0, "flags": {}},
+                "screeners": {
+                    "quality": {
+                        "id": "quality",
+                        "mode": "inline",
+                        "scored": 10,
+                        "kept": 8,
+                        "dropped": 3,
+                        "drops": {"low_score": 2, "near_dup": 1},
+                        "errors": 0,
+                        "candidates": {"low_score": 4, "near_dup": 2},
+                        "flags": {},
+                    }
+                },
             }
         },
         {
@@ -63,28 +68,33 @@ def test_merge_pipeline_stats_qc_counts_only():
                 "mode": "inline",
                 "min_score": 0.1,
                 "drop_near_dups": True,
-                "scored": 5,
-                "kept": 3,
-                "dropped_low_score": 1,
-                "dropped_near_dup": 0,
-                "errors": 1,
-                "candidates_low_score": 1,
-                "candidates_near_dup": 0,
-                "safety": {"enabled": False, "scored": 0, "dropped": 0, "errors": 0, "flags": {}},
+                "screeners": {
+                    "quality": {
+                        "id": "quality",
+                        "mode": "inline",
+                        "scored": 5,
+                        "kept": 3,
+                        "dropped": 1,
+                        "drops": {"low_score": 1},
+                        "errors": 1,
+                        "candidates": {"low_score": 1, "near_dup": 0},
+                        "flags": {},
+                    }
+                },
             }
         },
     ]
 
     merged = merge_pipeline_stats(stats)
-    qc = merged["qc"]
+    quality = merged["qc"]["screeners"]["quality"]
 
-    assert qc["scored"] == 15
-    assert qc["kept"] == 11
-    assert qc["dropped_low_score"] == 3
-    assert qc["dropped_near_dup"] == 1
-    assert qc["errors"] == 1
-    assert qc["candidates_low_score"] == 5
-    assert qc["candidates_near_dup"] == 2
+    assert quality["scored"] == 15
+    assert quality["kept"] == 11
+    assert quality["drops"]["low_score"] == 3
+    assert quality["drops"]["near_dup"] == 1
+    assert quality["errors"] == 1
+    assert quality["candidates"]["low_score"] == 5
+    assert quality["candidates"]["near_dup"] == 2
 
 
 def test_merge_pipeline_stats_safety_flags():
@@ -95,14 +105,17 @@ def test_merge_pipeline_stats_safety_flags():
                 "mode": "inline",
                 "min_score": 0.0,
                 "drop_near_dups": False,
-                "scored": 1,
-                "kept": 1,
-                "dropped_low_score": 0,
-                "dropped_near_dup": 0,
-                "errors": 0,
-                "candidates_low_score": 0,
-                "candidates_near_dup": 0,
-                "safety": {"enabled": True, "scored": 1, "dropped": 0, "errors": 0, "flags": {"pii": 1}},
+                "screeners": {
+                    "quality": {"id": "quality", "mode": "inline", "scored": 1, "kept": 1, "dropped": 0, "errors": 0},
+                    "safety": {
+                        "id": "safety",
+                        "mode": "inline",
+                        "scored": 1,
+                        "dropped": 0,
+                        "errors": 0,
+                        "flags": {"pii": 1},
+                    },
+                },
             }
         },
         {
@@ -111,20 +124,23 @@ def test_merge_pipeline_stats_safety_flags():
                 "mode": "inline",
                 "min_score": 0.0,
                 "drop_near_dups": False,
-                "scored": 2,
-                "kept": 1,
-                "dropped_low_score": 1,
-                "dropped_near_dup": 0,
-                "errors": 0,
-                "candidates_low_score": 0,
-                "candidates_near_dup": 0,
-                "safety": {"enabled": True, "scored": 2, "dropped": 1, "errors": 0, "flags": {"pii": 2, "toxicity": 1}},
+                "screeners": {
+                    "quality": {"id": "quality", "mode": "inline", "scored": 2, "kept": 1, "dropped": 1, "errors": 0},
+                    "safety": {
+                        "id": "safety",
+                        "mode": "inline",
+                        "scored": 2,
+                        "dropped": 1,
+                        "errors": 0,
+                        "flags": {"pii": 2, "toxicity": 1},
+                    },
+                },
             }
         },
     ]
 
     merged = merge_pipeline_stats(stats)
-    flags = merged["qc"]["safety"]["flags"]
+    flags = merged["qc"]["screeners"]["safety"]["flags"]
 
     assert flags == {"pii": 3, "toxicity": 1}
 
@@ -137,24 +153,27 @@ def test_merge_pipeline_stats_resets_signal_stats_and_top_dup_families():
                 "mode": "inline",
                 "min_score": 0.0,
                 "drop_near_dups": False,
-                "scored": 1,
-                "kept": 1,
-                "dropped_low_score": 0,
-                "dropped_near_dup": 0,
-                "errors": 0,
-                "candidates_low_score": 0,
-                "candidates_near_dup": 0,
-                "signal_stats": {"foo": 1},
                 "top_dup_families": ["abc"],
-                "safety": {"enabled": False, "scored": 0, "dropped": 0, "errors": 0, "flags": {}},
+                "screeners": {
+                    "quality": {
+                        "id": "quality",
+                        "mode": "inline",
+                        "scored": 1,
+                        "kept": 1,
+                        "dropped": 0,
+                        "errors": 0,
+                        "signal_stats": {"foo": {"count": 1, "mean": 1.0, "min": 1.0, "max": 1.0, "stdev": 0.0}},
+                    }
+                },
             }
         }
     ]
 
     merged = merge_pipeline_stats(stats)
     qc = merged["qc"]
+    quality = qc["screeners"]["quality"]
 
-    assert qc["signal_stats"] == {}
+    assert quality["signal_stats"] == {}
     assert qc["top_dup_families"] == []
 
 
@@ -170,14 +189,18 @@ def test_merge_pipeline_stats_handles_missing_qc():
                 "mode": "inline",
                 "min_score": 0.0,
                 "drop_near_dups": False,
-                "scored": 3,
-                "kept": 2,
-                "dropped_low_score": 1,
-                "dropped_near_dup": 0,
-                "errors": 0,
-                "candidates_low_score": 0,
-                "candidates_near_dup": 0,
-                "safety": {"enabled": False, "scored": 0, "dropped": 0, "errors": 0, "flags": {}},
+                "screeners": {
+                    "quality": {
+                        "id": "quality",
+                        "mode": "inline",
+                        "scored": 3,
+                        "kept": 2,
+                        "dropped": 1,
+                        "drops": {"low_score": 1},
+                        "errors": 0,
+                        "candidates": {},
+                    }
+                },
             },
         },
     ]
@@ -185,5 +208,6 @@ def test_merge_pipeline_stats_handles_missing_qc():
     merged = merge_pipeline_stats(stats)
 
     assert merged["files"] == 1
-    assert merged["qc"]["scored"] == 3
-    assert merged["qc"]["kept"] == 2
+    quality = merged["qc"]["screeners"]["quality"]
+    assert quality["scored"] == 3
+    assert quality["kept"] == 2

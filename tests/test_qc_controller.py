@@ -53,11 +53,13 @@ def test_tracker_observe_keep_vs_drop(tracker_basic):
     assert keep_low is False
     assert keep_mid is False
 
-    assert tracker_basic.scored == 3
-    assert tracker_basic.kept == 1
-    assert tracker_basic.candidates_low_score == 2
-    assert tracker_basic.dropped_low_score == 2
-    assert tracker_basic.dropped_near_dup == 0
+    quality = tracker_basic.get_screener("quality", create=False)
+    assert quality is not None
+    assert quality.scored == 3
+    assert quality.kept == 1
+    assert quality.candidates.get("low_score") == 2
+    assert quality.drops.get("low_score") == 2
+    assert quality.drops.get("near_dup", 0) == 0
 
 
 def test_tracker_observe_near_dups_and_dup_families():
@@ -70,8 +72,10 @@ def test_tracker_observe_near_dups_and_dup_families():
     tracker.observe(row_dup1, apply_gates=True)
     tracker.observe(row_dup2, apply_gates=True)
 
-    assert tracker.kept == 1
-    assert tracker.dropped_near_dup == 2
+    quality = tracker.get_screener("quality", create=False)
+    assert quality is not None
+    assert quality.kept == 1
+    assert quality.drops.get("near_dup") == 2
     assert "famA" in tracker.dup_families
     assert tracker.dup_families["famA"]["count"] == 3
     top = tracker.top_dup_families()
@@ -85,10 +89,14 @@ def test_tracker_summary_roundtrip(tracker_basic):
     summary = tracker_basic.as_dict()
     tracker2 = QCSummaryTracker.from_summary_dict(summary)
 
-    assert tracker2.scored == tracker_basic.scored
-    assert tracker2.kept == tracker_basic.kept
-    assert tracker2.dropped_low_score == tracker_basic.dropped_low_score
-    assert tracker2.dropped_near_dup == tracker_basic.dropped_near_dup
+    quality1 = tracker_basic.get_screener("quality", create=False)
+    quality2 = tracker2.get_screener("quality", create=False)
+
+    assert quality1 is not None and quality2 is not None
+    assert quality2.scored == quality1.scored
+    assert quality2.kept == quality1.kept
+    assert quality2.drops.get("low_score") == quality1.drops.get("low_score")
+    assert quality2.drops.get("near_dup") == quality1.drops.get("near_dup")
     assert tracker2.top_dup_families() == tracker_basic.top_dup_families()
 
 
@@ -120,8 +128,8 @@ def test_merge_from_summary_replaces_only_safety():
 
     assert tracker.screeners["quality"].scored == 1
     assert tracker.screeners["safety"].mode == QCMode.POST
-    assert tracker.safety_dropped == 1
-    assert tracker.safety_flags.get("pii") == 1
+    assert tracker.screeners["safety"].dropped == 1
+    assert tracker.screeners["safety"].flags.get("pii") == 1
 
 
 def test_observe_safety_tracks_mode():
@@ -137,8 +145,10 @@ def test_tracker_signal_stats_numeric_and_bool():
     tracker.observe({"score": 90.0, "ascii_ratio": 0.4, "parse_ok": True}, apply_gates=False)
     tracker.observe({"score": 91.0, "ascii_ratio": 0.6, "parse_ok": False}, apply_gates=False)
 
-    ascii_stats = tracker.signal_stats["ascii_ratio"].as_dict()
-    parse_stats = tracker.signal_stats["parse_ok"].as_dict()
+    quality = tracker.get_screener("quality", create=False)
+    assert quality is not None
+    ascii_stats = quality.signal_stats["ascii_ratio"].as_dict()
+    parse_stats = quality.signal_stats["parse_ok"].as_dict()
 
     assert ascii_stats["count"] == 2
     assert ascii_stats["mean"] == pytest.approx(0.5)
@@ -197,7 +207,8 @@ def test_inline_controller_reset_reuses_stats_tracker():
     assert tracker.min_score == 0.5
     assert tracker.drop_near_dups is True
     assert tracker.screeners == {}
-    assert tracker.errors == 0
+    quality = tracker.get_screener("quality", create=False)
+    assert quality is None or quality.errors == 0
 
 
 def make_controller(*, min_score=60.0, drop_near_dups=False, enforce_drops=True, qc_rows=()):
@@ -235,8 +246,10 @@ def test_inline_qc_accept_attachs_meta_and_keeps_when_passing():
 
     assert accepted is True
     assert stats.qc is not None
-    assert stats.qc.kept == 1
-    assert stats.qc.scored == 1
+    quality_stats = stats.qc.get_screener("quality", create=False)
+    assert quality_stats is not None
+    assert quality_stats.kept == 1
+    assert quality_stats.scored == 1
     meta = record["meta"]
     assert meta["qc_score"] == qc_row["score"]
     assert meta["approx_tokens"] == qc_row["tokens"]
@@ -261,13 +274,17 @@ def test_inline_vs_advisory_low_score_drops_or_keeps():
     acc_adv = controller_adv.accept(record_adv)
 
     assert acc_inline is False
-    assert stats_inline.qc.dropped_low_score == 1
-    assert stats_inline.qc.kept == 0
+    quality_inline = stats_inline.qc.get_screener("quality", create=False)
+    assert quality_inline is not None
+    assert quality_inline.drops.get("low_score") == 1
+    assert quality_inline.kept == 0
 
     assert acc_adv is True
-    assert stats_adv.qc.candidates_low_score == 1
-    assert stats_adv.qc.dropped_low_score == 0
-    assert stats_adv.qc.kept == 1
+    quality_adv = stats_adv.qc.get_screener("quality", create=False)
+    assert quality_adv is not None
+    assert quality_adv.candidates.get("low_score") == 1
+    assert quality_adv.drops.get("low_score", 0) == 0
+    assert quality_adv.kept == 1
 
 
 def test_near_dup_drop_vs_advisory_keep():
@@ -282,12 +299,16 @@ def test_near_dup_drop_vs_advisory_keep():
     acc_adv = controller_adv.accept(record_adv)
 
     assert acc_inline is False
-    assert stats_inline.qc.dropped_near_dup == 1
-    assert stats_inline.qc.candidates_near_dup >= 1
+    quality_inline = stats_inline.qc.get_screener("quality", create=False)
+    assert quality_inline is not None
+    assert quality_inline.drops.get("near_dup") == 1
+    assert quality_inline.candidates.get("near_dup", 0) >= 1
 
     assert acc_adv is True
-    assert stats_adv.qc.dropped_near_dup == 0
-    assert stats_adv.qc.candidates_near_dup >= 1
+    quality_adv = stats_adv.qc.get_screener("quality", create=False)
+    assert quality_adv is not None
+    assert quality_adv.drops.get("near_dup", 0) == 0
+    assert quality_adv.candidates.get("near_dup", 0) >= 1
 
 
 def test_merge_qc_meta_preserves_existing_extra():
@@ -307,42 +328,39 @@ def test_merge_qc_meta_preserves_existing_extra():
     assert "qc_score" not in qc_signals
 
 
-def test_qc_summary_tracker_legacy_roundtrip_preserves_top_fields():
+def test_qc_summary_tracker_roundtrip_preserves_screeners_only():
     summary = {
         "enabled": True,
         "mode": QCMode.INLINE,
         "min_score": 0.25,
         "drop_near_dups": True,
-        "scored": 3,
-        "kept": 2,
-        "dropped_low_score": 1,
-        "dropped_near_dup": 0,
-        "errors": 1,
-        "candidates_low_score": 1,
-        "candidates_near_dup": 0,
-        "signal_stats": {"foo": {"count": 1, "mean": 0.5, "min": 0.5, "max": 0.5, "stdev": 0.0}},
-        "safety": {
-            "enabled": True,
-            "scored": 2,
-            "dropped": 1,
-            "errors": 0,
-            "flags": {"p1": 1},
+        "top_dup_families": [{"dup_family_id": "fam1", "count": 2}],
+        "screeners": {
+            "quality": {
+                "id": "quality",
+                "mode": QCMode.INLINE,
+                "scored": 3,
+                "kept": 2,
+                "dropped": 1,
+                "errors": 1,
+                "candidates": {"low_score": 1},
+                "drops": {"low_score": 1},
+                "signal_stats": {"foo": {"count": 1, "mean": 0.5, "min": 0.5, "max": 0.5, "stdev": 0.0}},
+            },
+            "safety": {"id": "safety", "mode": QCMode.INLINE, "scored": 2, "dropped": 1, "errors": 0, "flags": {"p1": 1}},
         },
     }
     tracker = QCSummaryTracker.from_summary_dict(summary)
     roundtrip = tracker.as_dict()
 
-    assert roundtrip["min_score"] == summary["min_score"]
-    assert roundtrip["drop_near_dups"] is True
-    assert roundtrip["scored"] == summary["scored"]
-    assert roundtrip["kept"] == summary["kept"]
-    assert roundtrip["dropped_low_score"] == summary["dropped_low_score"]
-    assert roundtrip["safety"]["scored"] == summary["safety"]["scored"]
-    assert roundtrip["safety"]["dropped"] == summary["safety"]["dropped"]
-    # legacy input should have screeners synthesized
-    assert "screeners" in roundtrip
-    assert "quality" in roundtrip["screeners"]
-    assert "safety" in roundtrip["screeners"]
+    assert set(roundtrip.keys()) == {"enabled", "mode", "min_score", "drop_near_dups", "top_dup_families", "screeners"}
+    quality = roundtrip["screeners"]["quality"]
+    assert quality["scored"] == 3
+    assert quality["kept"] == 2
+    assert quality["drops"]["low_score"] == 1
+    safety = roundtrip["screeners"]["safety"]
+    assert safety["scored"] == 2
+    assert safety["dropped"] == 1
 
 
 def test_qc_summary_tracker_reads_new_screener_payload():
@@ -371,12 +389,14 @@ def test_qc_summary_tracker_reads_new_screener_payload():
     tracker = QCSummaryTracker.from_summary_dict(summary)
     result = tracker.as_dict()
 
-    assert result["scored"] == 2  # quality view
-    assert result["kept"] == 1
-    assert result["dropped_low_score"] == 1
-    assert result["safety"]["scored"] == 1
-    assert result["safety"]["dropped"] == 1
-    assert result["screeners"]["quality"]["signal_stats"]["len_tok"]["count"] == 1
+    quality_summary = result["screeners"]["quality"]
+    assert quality_summary["scored"] == 2
+    assert quality_summary["kept"] == 1
+    assert quality_summary["drops"]["low_score"] == 1
+    safety_summary = result["screeners"]["safety"]
+    assert safety_summary["scored"] == 1
+    assert safety_summary["dropped"] == 1
+    assert quality_summary["signal_stats"]["len_tok"]["count"] == 1
 
 
 class DropScorer:
@@ -514,8 +534,9 @@ def test_process_record_records_quality_error_on_exception():
     kept = controller.process_record({"text": "boom", "meta": {"path": "err.py"}})
 
     assert kept is None
-    assert stats.qc.errors == 1
-    assert stats.qc.screeners["quality"].errors == 1
+    quality_stats = stats.qc.get_screener("quality", create=False)
+    assert quality_stats is not None
+    assert quality_stats.errors == 1
 
 
 def test_process_record_records_safety_error_on_exception():
@@ -534,8 +555,9 @@ def test_process_record_records_safety_error_on_exception():
     kept = controller.process_record({"text": "boom", "meta": {"path": "safety_err.py"}})
 
     assert kept is None
-    assert stats.qc.safety_errors == 1
-    assert stats.qc.screeners["safety"].errors == 1
+    safety_stats = stats.qc.get_screener("safety", create=False)
+    assert safety_stats is not None
+    assert safety_stats.errors == 1
 
 
 def test_process_record_records_custom_error_and_rolls_back_kept():

@@ -847,6 +847,9 @@ class PipelineEngine:
         tracker = self.stats.qc
         if not tracker.enabled:
             return
+        quality = tracker.get_screener("quality", create=False)
+        if quality is None:
+            return
         min_score_str = (
             f"{tracker.min_score:.1f}" if tracker.min_score is not None else "off"
         )
@@ -861,13 +864,13 @@ class PipelineEngine:
             "  errors: %d",
             min_score_str,
             "on" if tracker.drop_near_dups else "off",
-            tracker.scored,
-            tracker.kept,
-            tracker.dropped_low_score,
-            tracker.dropped_near_dup,
-            tracker.candidates_low_score,
-            tracker.candidates_near_dup,
-            tracker.errors,
+            quality.scored,
+            quality.kept,
+            quality.drops.get("low_score", 0),
+            quality.drops.get("near_dup", 0),
+            quality.candidates.get("low_score", 0),
+            quality.candidates.get("near_dup", 0),
+            quality.errors,
         )
         top = tracker.top_dup_families()
         if top:

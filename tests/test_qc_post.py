@@ -46,7 +46,8 @@ def test_run_qc_over_jsonl_writes_signals_csv(tmp_path: Path) -> None:
         signals_suffix="_signals.csv",
     )
 
-    assert summary["signal_stats"].get("len_tok", {}).get("count") == 2
+    quality_summary = summary["screeners"]["quality"]
+    assert quality_summary["signal_stats"].get("len_tok", {}).get("count") == 2
 
     signals_path = Path(str(jsonl_path)[:-6] + "_signals.csv")
     assert signals_path.exists()
@@ -84,7 +85,8 @@ def test_run_qc_over_jsonl_writes_signals_parquet(tmp_path: Path) -> None:
         signals_format="parquet",
     )
 
-    assert summary["signal_stats"].get("len_tok", {}).get("count") == 2
+    quality_summary = summary["screeners"]["quality"]
+    assert quality_summary["signal_stats"].get("len_tok", {}).get("count") == 2
 
     signals_path = Path(str(jsonl_path)[:-6] + "_signals.parquet")
     assert signals_path.exists()

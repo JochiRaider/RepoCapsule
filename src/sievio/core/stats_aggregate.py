@@ -10,7 +10,7 @@ while clearing non-additive QC fields.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Mapping, Sequence
 
 
 def _init_qc_template(sample_qc: Dict[str, Any]) -> Dict[str, Any]:
@@ -22,50 +22,63 @@ def _init_qc_template(sample_qc: Dict[str, Any]) -> Dict[str, Any]:
         "mode": sample_qc.get("mode"),
         "min_score": sample_qc.get("min_score"),
         "drop_near_dups": sample_qc.get("drop_near_dups"),
+        "top_dup_families": [],
+        "screeners": {},
+    }
+    screeners = sample_qc.get("screeners") or {}
+    if isinstance(screeners, Mapping):
+        for sid, payload in screeners.items():
+            if not isinstance(payload, Mapping):
+                continue
+            tmpl["screeners"][sid] = _init_screener_template(payload, default_id=str(sid))
+    return tmpl
+
+
+def _init_screener_template(sample: Mapping[str, Any], *, default_id: str) -> Dict[str, Any]:
+    """Build a zeroed-out screener payload preserving config fields."""
+    return {
+        "id": sample.get("id") or default_id,
+        "enabled": bool(sample.get("enabled")),
+        "mode": sample.get("mode"),
         "scored": 0,
         "kept": 0,
-        "dropped_low_score": 0,
-        "dropped_near_dup": 0,
-        "errors": 0,
-        "candidates_low_score": 0,
-        "candidates_near_dup": 0,
-    }
-    safety = sample_qc.get("safety") or {}
-    tmpl["safety"] = {
-        "enabled": bool(safety.get("enabled", False)),
-        "scored": 0,
         "dropped": 0,
         "errors": 0,
+        "signal_stats": {},
         "flags": {},
+        "candidates": {},
+        "drops": {},
     }
-    tmpl["signal_stats"] = {}
-    tmpl["top_dup_families"] = []
-    return tmpl
 
 
 def _accumulate_qc_counts(out_qc: Dict[str, Any], qc: Dict[str, Any]) -> None:
     """
     Add numeric QC counters and merge safety flag counts into out_qc.
     """
-    for field in (
-        "scored",
-        "kept",
-        "dropped_low_score",
-        "dropped_near_dup",
-        "errors",
-        "candidates_low_score",
-        "candidates_near_dup",
-    ):
-        out_qc[field] += int(qc.get(field, 0))
-
-    safety_out = out_qc["safety"]
-    safety_in = qc.get("safety") or {}
-    for key in ("scored", "dropped", "errors"):
-        safety_out[key] += int(safety_in.get(key, 0))
-
-    flags_out = safety_out["flags"]
-    for flag, count in (safety_in.get("flags") or {}).items():
-        flags_out[flag] = flags_out.get(flag, 0) + int(count)
+    out_qc["enabled"] = out_qc.get("enabled") or qc.get("enabled")
+    screeners = qc.get("screeners") or {}
+    if not isinstance(screeners, Mapping):
+        return
+    out_screeners = out_qc.setdefault("screeners", {})
+    for sid, payload in screeners.items():
+        if not isinstance(payload, Mapping):
+            continue
+        bucket = out_screeners.get(sid)
+        if bucket is None:
+            bucket = _init_screener_template(payload, default_id=str(sid))
+            out_screeners[sid] = bucket
+        else:
+            if bucket.get("mode") != payload.get("mode"):
+                raise ValueError(f"Inconsistent screener mode for {sid}.")
+        bucket["enabled"] = bucket.get("enabled") or bool(payload.get("enabled"))
+        for key in ("scored", "kept", "dropped", "errors"):
+            bucket[key] = int(bucket.get(key, 0)) + int(payload.get(key, 0))
+        for key in ("flags", "candidates", "drops"):
+            out_map = bucket.get(key) or {}
+            for name, count in (payload.get(key) or {}).items():
+                out_map[name] = out_map.get(name, 0) + int(count)
+            bucket[key] = out_map
+        bucket["signal_stats"] = {}  # non-additive; cleared during aggregation
 
 
 def merge_pipeline_stats(stats_dicts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -108,8 +121,6 @@ def merge_pipeline_stats(stats_dicts: Sequence[Dict[str, Any]]) -> Dict[str, Any
                 raise ValueError("Inconsistent QC config across stats (mode/min_score).")
             if qc_agg.get("drop_near_dups") != qc.get("drop_near_dups"):
                 raise ValueError("Inconsistent QC config across stats (drop_near_dups).")
-            if (qc_agg.get("safety") or {}).get("enabled") != (qc.get("safety") or {}).get("enabled"):
-                raise ValueError("Inconsistent QC safety.enabled across stats.")
         _accumulate_qc_counts(qc_agg, qc)
 
     merged["qc"] = qc_agg or {}
