@@ -194,6 +194,7 @@ records = list(iter_records_from_bytes_with_plan(data, rel_path="foo.bin", plan=
 ### Concurrency
 - `pipeline.executor_kind`: `"thread"`, `"process"`, or `"auto"` (default). `pipeline.max_workers` / `submit_window` tune pool size and submission window.
 - `resolve_pipeline_executor_config` (in `core/concurrency.py`) inspects the configured sources and bytes handlers (for example, PDF/EVTX-heavy pipelines) and chooses thread vs process executors when `executor_kind="auto"`. Text/code-only workloads default to threads; heavy binary handlers and sources bias toward processes. `fail_fast` controls whether worker failures abort the run.
+- Components can optionally expose `preferred_executor`, `cpu_intensive`, or a `concurrency_profile` implementing `ConcurrencyProfile`. Malformed hints are ignored with warnings; set `SIEVIO_STRICT_CONCURRENCY_HINTS=1` to fail fast when developing plugins.
 - QC post-processing uses `resolve_qc_executor_config`; `qc.parallel_post` enables process-based scoring when available.
 
 ### Logging

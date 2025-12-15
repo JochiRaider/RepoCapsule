@@ -4,7 +4,13 @@ import time
 import pytest
 
 from sievio.core.config import SievioConfig
-from sievio.core.concurrency import Executor, ExecutorConfig, infer_executor_kind, process_items_parallel
+from sievio.core.concurrency import (
+    Executor,
+    ExecutorConfig,
+    _extract_concurrency_hint,
+    infer_executor_kind,
+    process_items_parallel,
+)
 
 
 def _process_one_echo(item):
@@ -187,3 +193,76 @@ def test_infer_executor_respects_attributes():
 
     kind = infer_executor_kind(cfg)
     assert kind == "process"
+
+
+def test_extract_concurrency_hint_normalizes_valid_values():
+    class Dummy:
+        pass
+
+    obj = Dummy()
+    obj.preferred_executor = "Process"
+    obj.cpu_intensive = True
+
+    preferred, cpu = _extract_concurrency_hint(obj)
+
+    assert preferred == "process"
+    assert cpu is True
+
+
+def test_extract_concurrency_hint_warns_on_invalid_preferred_type(caplog):
+    class Dummy:
+        pass
+
+    obj = Dummy()
+    obj.preferred_executor = 123  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING", logger="sievio.core.concurrency"):
+        preferred, cpu = _extract_concurrency_hint(obj)
+
+    assert preferred is None
+    assert cpu is False
+    assert any("preferred_executor" in rec.message for rec in caplog.records)
+
+
+def test_extract_concurrency_hint_warns_on_invalid_preferred_value(caplog):
+    class Dummy:
+        pass
+
+    obj = Dummy()
+    obj.preferred_executor = "gpu"
+
+    with caplog.at_level("WARNING", logger="sievio.core.concurrency"):
+        preferred, cpu = _extract_concurrency_hint(obj)
+
+    assert preferred is None
+    assert cpu is False
+    assert any("preferred_executor" in rec.message for rec in caplog.records)
+
+
+def test_extract_concurrency_hint_warns_on_malformed_profile(caplog):
+    class Dummy:
+        pass
+
+    obj = Dummy()
+    obj.preferred_executor = "thread"
+    obj.concurrency_profile = object()
+
+    with caplog.at_level("WARNING", logger="sievio.core.concurrency"):
+        preferred, cpu = _extract_concurrency_hint(obj)
+
+    assert preferred == "thread"
+    assert cpu is False
+    assert any("concurrency_profile" in rec.message for rec in caplog.records)
+
+
+def test_extract_concurrency_hint_strict_mode_raises(monkeypatch):
+    class Dummy:
+        pass
+
+    obj = Dummy()
+    obj.preferred_executor = 42  # type: ignore[assignment]
+
+    monkeypatch.setenv("SIEVIO_STRICT_CONCURRENCY_HINTS", "1")
+
+    with pytest.raises(ValueError):
+        _extract_concurrency_hint(obj)
