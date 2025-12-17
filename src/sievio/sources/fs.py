@@ -408,6 +408,7 @@ class LocalDirSource(Source):
                 origin_path=str(path.resolve()),
                 stream_hint="file",
                 streamable=True,
+                open_stream=lambda p=path: p.open("rb"),
             )
 
 
@@ -482,6 +483,5 @@ class PatternFileSource(Source):
                     origin_path=str(path.resolve()),
                     stream_hint="file",
                     streamable=True,
+                    open_stream=lambda p=path: p.open("rb"),
                 )
-
-
