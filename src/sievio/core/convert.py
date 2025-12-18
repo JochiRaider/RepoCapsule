@@ -351,6 +351,7 @@ def resolve_bytes_from_file_item(item: FileItem, decode_cfg: DecodeConfig) -> By
                 return ByteSource(data=read, origin=None, size=file_size)
         except Exception as exc:
             log.warning("Failed to open stream for %s: %s", getattr(item, "path", None), exc)
+            return ByteSource(data=None, origin=None, size=file_size)
 
     if reopenable:
         max_bytes = decode_cfg.max_bytes_per_file
