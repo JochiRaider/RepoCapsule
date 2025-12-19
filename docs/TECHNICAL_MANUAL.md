@@ -120,7 +120,7 @@ Library helpers for this flow live in `core/sharding.py` and `core/stats_aggrega
 ## Concepts & architecture
 ### Configuration (`SievioConfig`)
 `SievioConfig` in `core/config.py` is the single source of truth for how a run is wired. Its major sections map directly to the TOML layout:
-- `sources`: defaults (`[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]`) plus per-kind defaults (`[sources.defaults.<kind>]` such as `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`, `local_dir`) and declarative `[[sources.specs]]` entries (e.g., `local_dir`, `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`).
+- `sources`: per-kind defaults in `[sources.defaults.<kind>]` (e.g., `github_zip`, `web_pdf_list`, `web_page_pdf`, `csv_text`, `sqlite`, `local_dir`) plus declarative `[[sources.specs]]` entries. The schema also exposes `[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]` for serialization/reference, but factories only consume `[sources.defaults.*]` and `[[sources.specs]]`.
 - `decode`: Unicode normalization, control stripping, mojibake repair, and optional per-file byte caps (`DecodeConfig`).
 - `chunk`: tokenizer selection (`tokenizer_name`), language metadata attachment, and the `ChunkPolicy` used for chunk sizes/overlap/semantic splitting.
 - `language`: enable/disable human-language detection and choose backend (`baseline` or `lingua` when `[langid]` is installed).
@@ -259,7 +259,7 @@ This pattern works across many runs: each run appends a fragment, and the final 
 ## Configuration reference
 Use `example_config.toml` as the canonical reference. A compact TOML sketch:
 ```toml
-[sources.local]
+[sources.defaults.local_dir]
 skip_hidden = true
 
 [[sources.specs]]
@@ -493,7 +493,7 @@ This section explains what the major configuration sections *mean* in terms of p
 
 **Context:** Controls *where data comes from* and how aggressively it is filtered.
 
-- `[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]` set **defaults** for classes of sources (e.g. max file bytes, skip hidden, respect `.gitignore`, default columns).
+- `[sources.defaults.<kind>]` holds the only defaults factories consult (e.g. `local_dir`, `github_zip`, `csv_text`, `sqlite`, `web_pdf_list`, `web_page_pdf`). The schema also exposes `[sources.local]`, `[sources.github]`, `[sources.pdf]`, `[sources.csv]`, `[sources.sqlite]` for serialization/reference, but those are not applied by source factories.
 - Each `[[sources.specs]]` entry says:
   - **`kind`** → which `SourceFactory` to use (e.g. `"local_dir"`, `"github_zip"`, `"csv_text"`, `"sqlite"`).
   - **`options`** → concrete parameters (paths, URLs, table names, queries, text column, etc.).

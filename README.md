@@ -97,6 +97,12 @@ sievio card --fragments "out/*.card.json" --output README.md
 # Post-hoc QC over an existing JSONL (requires the `qc` extra)
 sievio qc out.jsonl --csv out_quality.csv
 
+# Generate shard configs from a base config + targets list
+sievio shard --targets targets.txt --base config.toml --shards 8 --out-dir shards/ --kind web_pdf_list
+
+# Merge stats JSON files from multiple shards
+sievio merge-stats shards/*/stats.json > merged_stats.json
+
 # See all commands and options
 sievio --help
 ```

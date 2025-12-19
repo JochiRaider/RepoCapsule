@@ -109,14 +109,20 @@ For rules, invariants, and AI usage guidelines, see `AGENTS.md`.
     ├── test_convert.py
     ├── test_convert_integration.py
     ├── test_dataset_card.py
+    ├── test_dataset_card_qc.py
     ├── test_decode.py
     ├── test_decode_fallback.py
     ├── test_dedup_store.py
     ├── test_factories_sources_config_overlays.py
     ├── test_hooks.py
+    ├── test_jsonl_source.py
+    ├── test_language_customization.py
     ├── test_log_and_naming.py
+    ├── test_pipeline_error_rate.py
     ├── test_pipeline_middlewares.py
+    ├── test_pipeline_streaming.py
     ├── test_plugins_and_registries.py
+    ├── test_sources_fs.py
     ├── test_qc_controller.py
     ├── test_qc_defaults.py
     ├── test_qc_integration.py
