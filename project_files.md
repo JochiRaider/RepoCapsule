@@ -13,22 +13,33 @@ For rules, invariants, and AI usage guidelines, see `AGENTS.md`.
 ├── LICENSE
 ├── README.md
 ├── AGENTS.md
+├── LLMS.md
 ├── core_upload.md
 ├── docs
-│   └── TECHNICAL_MANUAL.md
+│   ├── README.md
+│   ├── CONFIGURATION.md
+│   ├── CONTRIBUTING.md
+│   ├── DEPLOYMENT.md
+│   ├── QUALITY_CONTROL.md
+│   ├── TECHNICAL_MANUAL.md
+│   └── cookbook
+│       ├── README.md
+│       ├── custom_pii_scrubbing.md
+│       ├── dedup_post_qc.md
+│       └── pdf_ingestion.md
 ├── example_config.toml
-├── LLMS.md
 ├── manual_test_github.toml
 ├── project_files.md
 ├── pyproject.toml
 ├── sample.jsonl
 ├── scripts
+│   ├── generate_configuration_md.py
 │   ├── manual_test_github.py
 │   ├── manual_test_github_toml.py
 │   ├── manual_test_web_pdf.py
 │   └── seed_dedup_db.py
 ├── src
-│   ├── sievio
+│   └── sievio
 │       ├── __init__.py
 │       ├── cli
 │       │   ├── __init__.py

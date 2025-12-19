@@ -69,6 +69,14 @@ pip install -e .
 pip install -e ".[tok,pdf,parquet,qc,evtx,langid]"
 ```
 
+## Documentation
+- Docs index: `docs/README.md`
+- Technical manual: `docs/TECHNICAL_MANUAL.md`
+- Configuration reference (generated): `docs/CONFIGURATION.md`
+- Quality control: `docs/QUALITY_CONTROL.md`
+- Deployment/sharding: `docs/DEPLOYMENT.md`
+- Cookbook recipes: `docs/cookbook/`
+
 ## Usage
 
 ### CLI
