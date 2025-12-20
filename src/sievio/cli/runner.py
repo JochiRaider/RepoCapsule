@@ -60,7 +60,11 @@ def run_engine(engine: PipelineEngine) -> dict[str, int]:
 
 
 # ---------- One generic entry point ----------
-def convert(config: SievioConfig | PipelineEngine, *, overrides: PipelineOverrides | None = None) -> dict[str, int]:
+def convert(
+    config: SievioConfig | PipelineEngine,
+    *,
+    overrides: PipelineOverrides | None = None,
+) -> dict[str, int]:
     """Convert sources to datasets using a config or prepared engine.
 
     This is the main programmatic entry point for Sievio. When

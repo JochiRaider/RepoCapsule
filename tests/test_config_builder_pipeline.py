@@ -219,7 +219,7 @@ def test_config_roundtrip_toml(tmp_path: Path):
     cfg.metadata.repo_url = "https://example.com/repo"
 
     path = tmp_path / "config.toml"
-    content = '[metadata]\nrepo_url = "%s"\n' % cfg.metadata.repo_url
+    content = f'[metadata]\nrepo_url = "{cfg.metadata.repo_url}"\n'
     path.write_text(content, encoding="utf-8")
 
     loaded = load_config_from_path(path)

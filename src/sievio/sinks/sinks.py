@@ -6,7 +6,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +16,12 @@ from ..core.interfaces import Record, RepoContext
 class _BaseJSONLSink:
     """Shared JSONL sink logic with optional header support."""
 
-    def __init__(self, out_path: str | os.PathLike[str], *, header_record: Mapping[str, Any] | None = None):
+    def __init__(
+        self,
+        out_path: str | os.PathLike[str],
+        *,
+        header_record: Mapping[str, Any] | None = None,
+    ):
         """Configure a JSONL sink.
 
         Args:
@@ -27,7 +32,9 @@ class _BaseJSONLSink:
         self._path = Path(out_path)
         self._fp = None
         self._tmp_path: Path | None = None
-        self._header_record: Mapping[str, Any] | None = dict(header_record) if header_record else None
+        self._header_record: Mapping[str, Any] | None = (
+            dict(header_record) if header_record else None
+        )
         self._header_written = False
 
     def open(self, context: RepoContext | None = None) -> None:
@@ -107,7 +114,12 @@ class _BaseJSONLSink:
 class JSONLSink(_BaseJSONLSink):
     """Simple streaming JSONL sink (one record per line)."""
 
-    def __init__(self, out_path: str | os.PathLike[str], *, header_record: Mapping[str, Any] | None = None):
+    def __init__(
+        self,
+        out_path: str | os.PathLike[str],
+        *,
+        header_record: Mapping[str, Any] | None = None,
+    ):
         super().__init__(out_path, header_record=header_record)
 
     def _open_handle(self, path: Path):
@@ -120,7 +132,12 @@ class JSONLSink(_BaseJSONLSink):
 class GzipJSONLSink(_BaseJSONLSink):
     """Streaming JSONL sink that gzip-compresses its output."""
 
-    def __init__(self, out_path: str | os.PathLike[str], *, header_record: Mapping[str, Any] | None = None):
+    def __init__(
+        self,
+        out_path: str | os.PathLike[str],
+        *,
+        header_record: Mapping[str, Any] | None = None,
+    ):
         super().__init__(out_path, header_record=header_record)
 
     def _open_handle(self, path: Path):
@@ -133,7 +150,12 @@ class GzipJSONLSink(_BaseJSONLSink):
 class PromptTextSink:
     """Write human-readable prompt text for chunked documents."""
 
-    def __init__(self, out_path: str | os.PathLike[str], *, heading_fmt: str = "### {path} [chunk {chunk}]"):
+    def __init__(
+        self,
+        out_path: str | os.PathLike[str],
+        *,
+        heading_fmt: str = "### {path} [chunk {chunk}]",
+    ):
         """Configure the destination and heading format.
 
         Args:

@@ -79,7 +79,12 @@ class _RootPathPolicy:
                 return True
         return False
 
-    def normalize_file(self, path: Path, *, lexical_rel: Path | None = None) -> tuple[str, Path] | None:
+    def normalize_file(
+        self,
+        path: Path,
+        *,
+        lexical_rel: Path | None = None,
+    ) -> tuple[str, Path] | None:
         """
         Normalize a candidate file path against the configured root.
 
@@ -140,8 +145,8 @@ class _RootPathPolicy:
                 stat_kwargs["follow_symlinks"] = False
             try:
                 base_expected = os.stat(resolved, **stat_kwargs)
-            except OSError:
-                raise FileNotFoundError(f"refused to open path outside root: {rel_posix}")
+            except OSError as exc:
+                raise FileNotFoundError(f"refused to open path outside root: {rel_posix}") from exc
             if not stat.S_ISREG(base_expected.st_mode):
                 raise FileNotFoundError(f"refusing to open non-regular file: {rel_posix}")
 
@@ -346,7 +351,9 @@ def _parse_gitignore_lines(lines: Iterable[str], base: str) -> list[GitignoreRul
             continue
         
         prefix = "!" if negate else ""
-        rules.append(GitignoreRule(pattern=prefix + pat, negate=negate, dir_only=dir_only, base=base))
+        rules.append(
+            GitignoreRule(pattern=prefix + pat, negate=negate, dir_only=dir_only, base=base)
+        )
     return rules
 
 
@@ -358,11 +365,19 @@ def _load_gitignore_file(path: Path, repo_root: Path) -> list[GitignoreRule]:
     except OSError:
         return []
     try:
-        base_posix = path.parent.relative_to(repo_root).as_posix() if path.parent != repo_root else "."
+        base_posix = (
+            path.parent.relative_to(repo_root).as_posix()
+            if path.parent != repo_root
+            else "."
+        )
     except ValueError:
         try:
             resolved_parent = path.parent.resolve()
-            base_posix = resolved_parent.relative_to(repo_root).as_posix() if resolved_parent != repo_root else "."
+            base_posix = (
+                resolved_parent.relative_to(repo_root).as_posix()
+                if resolved_parent != repo_root
+                else "."
+            )
         except ValueError:
             return []  # .gitignore lives outside the repo; ignore its rules
     try:
@@ -411,7 +426,9 @@ def iter_repo_files(
     # Matcher cache per directory path
     matchers: dict[Path, GitignoreMatcher] = {walk_root: GitignoreMatcher()}
 
-    for dirpath, dirnames, filenames in os.walk(walk_root, topdown=True, followlinks=follow_symlinks):
+    for dirpath, dirnames, filenames in os.walk(
+        walk_root, topdown=True, followlinks=follow_symlinks
+    ):
         # Ensure deterministic order across platforms
         try:
             dirnames.sort(key=str.casefold)
@@ -454,7 +471,8 @@ def iter_repo_files(
             if respect_gitignore and matcher.ignores(rel + "/", is_dir=True):
                 dirnames.remove(name)
                 continue
-            # seed child's matcher with current matcher; will be extended if child has its own .gitignore
+            # Seed child's matcher with current matcher; extend if the child has its own
+            # .gitignore.
             matchers[subdir] = matcher
 
         # Files
@@ -639,14 +657,18 @@ class PatternFileSource(Source):
                 large_only = getattr(cfg, "read_prefix_for_large_files_only", True)
                 prefix_data: bytes | None = None
                 original_size = size
-                should_read_prefix = prefix_limit is not None and ((not large_only) or size > prefix_limit)
+                should_read_prefix = prefix_limit is not None and (
+                    (not large_only) or size > prefix_limit
+                )
                 if should_read_prefix:
                     try:
                         prefix_data, original_size = read_file_prefix(
                             origin_path,
                             prefix_limit,
                             file_size=size,
-                            opener=self._policy.make_open_stream(rel_str, expected_stat=stat_result),
+                            opener=self._policy.make_open_stream(
+                                rel_str, expected_stat=stat_result
+                            ),
                         )
                     except Exception:
                         continue

@@ -72,7 +72,11 @@ class JSONLTextSource(Source):
 
         policy = self.read_policy
         for path in self.paths:
-            opener = _open_jsonl_gz if "".join(path.suffixes[-2:]).lower() == ".jsonl.gz" else _open_jsonl
+            opener = (
+                _open_jsonl_gz
+                if "".join(path.suffixes[-2:]).lower() == ".jsonl.gz"
+                else _open_jsonl
+            )
             try:
                 with opener(path, errors=policy.decode_errors) as fp:
                     checked_schema = False
@@ -93,14 +97,23 @@ class JSONLTextSource(Source):
                         except json.JSONDecodeError as exc:
                             invalid_json_lines += 1
                             if invalid_json_lines <= policy.max_invalid_json_warnings:
-                                log.warning("Skipping invalid JSON at %s:#%d: %s", path, lineno, exc)
+                                log.warning(
+                                    "Skipping invalid JSON at %s:#%d: %s", path, lineno, exc
+                                )
                                 if invalid_json_lines == policy.max_invalid_json_warnings:
-                                    log.debug("Suppressing further invalid JSON warnings for %s", path)
+                                    log.debug(
+                                        "Suppressing further invalid JSON warnings for %s",
+                                        path,
+                                    )
                             continue
                         if not isinstance(record, dict):
                             non_dict_lines += 1
                             continue
-                        if self.check_schema and not checked_schema and _should_check_schema(record):
+                        if (
+                            self.check_schema
+                            and not checked_schema
+                            and _should_check_schema(record)
+                        ):
                             check_record_schema(record, log)
                             checked_schema = True
                         text = _extract_text(record, self.text_key)
@@ -178,14 +191,29 @@ def _iter_lines_with_limits(
         if max_file_chars is not None and total_chars > max_file_chars:
             if not stats.truncated:
                 stats.truncated = True
-                log.warning("Truncated JSONL file %s after reaching read limit (%d chars)", path, max_file_chars)
+                log.warning(
+                    "Truncated JSONL file %s after reaching read limit (%d chars)",
+                    path,
+                    max_file_chars,
+                )
             break
-        if max_line_chars is not None and len(line) > max_line_chars and not line.endswith("\n"):
+        if (
+            max_line_chars is not None
+            and len(line) > max_line_chars
+            and not line.endswith("\n")
+        ):
             stats.oversized_lines += 1
             if stats.oversized_lines <= policy.max_oversized_line_warnings:
-                log.warning("Skipping line %s:#%d exceeding max_line_chars=%d", path, lineno, max_line_chars)
+                log.warning(
+                    "Skipping line %s:#%d exceeding max_line_chars=%d",
+                    path,
+                    lineno,
+                    max_line_chars,
+                )
                 if stats.oversized_lines == policy.max_oversized_line_warnings:
-                    log.debug("Suppressing further oversized line warnings for %s", path)
+                    log.debug(
+                        "Suppressing further oversized line warnings for %s", path
+                    )
             total_chars, halted = _drain_oversized_line(
                 fp,
                 read_limit=read_limit,
@@ -219,7 +247,11 @@ def _drain_oversized_line(
         if max_file_chars is not None and total_chars > max_file_chars:
             if not stats.truncated:
                 stats.truncated = True
-                log.warning("Truncated JSONL file %s after reaching read limit (%d chars)", path, max_file_chars)
+                log.warning(
+                    "Truncated JSONL file %s after reaching read limit (%d chars)",
+                    path,
+                    max_file_chars,
+                )
             return total_chars, True
         if chunk.endswith("\n"):
             return total_chars, False
@@ -256,7 +288,9 @@ def _sanitize_path_label(path_val: str) -> str:
     """Normalize a meta-supplied path to a safe, path-like label."""
 
     cleaned = path_val.replace("\\", "/").lstrip("/")
-    cleaned = "".join(ch for ch in cleaned if ch.isprintable() and ch not in {"\r", "\n", "\x00"})
+    cleaned = "".join(
+        ch for ch in cleaned if ch.isprintable() and ch not in {"\r", "\n", "\x00"}
+    )
     parts = []
     for part in cleaned.split("/"):
         if not part or part == "." or part == "..":

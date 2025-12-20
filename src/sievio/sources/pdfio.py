@@ -237,7 +237,14 @@ def extract_pdf_records(
                     n_chunks=n,
                     url=url_hint,
                     source_domain=domain_hint,
-                    extra_meta=_with_context_extra({"subkind": "pdf", "page": i, "n_pages": n, "pdf_meta": pdf_meta or None}),
+                    extra_meta=_with_context_extra(
+                        {
+                            "subkind": "pdf",
+                            "page": i,
+                            "n_pages": n,
+                            "pdf_meta": pdf_meta or None,
+                        }
+                    ),
                     file_nlines=file_nlines,
                 )
             )
@@ -257,7 +264,9 @@ def extract_pdf_records(
                     n_chunks=n,
                     url=url_hint,
                     source_domain=domain_hint,
-                    extra_meta=_with_context_extra({"subkind": "pdf", "pdf_meta": pdf_meta or None}),
+                    extra_meta=_with_context_extra(
+                        {"subkind": "pdf", "pdf_meta": pdf_meta or None}
+                    ),
                     tokens=ch.get("n_tokens"),
                     file_nlines=file_nlines,
                 )

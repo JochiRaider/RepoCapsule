@@ -61,7 +61,12 @@ def _iter_rows_from_table(
             empty tuple when required columns are missing.
     """
     if text_column not in table.column_names or meta_column not in table.column_names:
-        log.info("Parquet handler skipping %s: missing columns %s/%s", rel, text_column, meta_column)
+        log.info(
+            "Parquet handler skipping %s: missing columns %s/%s",
+            rel,
+            text_column,
+            meta_column,
+        )
         return ()
 
     ctx_defaults = ctx.as_meta_seed() if ctx else None
@@ -84,11 +89,19 @@ def _iter_rows_from_table(
                 for key, value in ctx_defaults.items():
                     meta.setdefault(key, value)
             path_hint = meta.get("path")
-            rel_hint = path_hint if isinstance(path_hint, str) and path_hint else f"{rel}#row={idx}"
+            rel_hint = (
+                path_hint
+                if isinstance(path_hint, str) and path_hint
+                else f"{rel}#row={idx}"
+            )
             meta.setdefault("path", rel_hint)
             meta.setdefault("chunk_id", 1)
             meta.setdefault("n_chunks", 1)
-            text_str = text_val if isinstance(text_val, str) else ("" if text_val is None else str(text_val))
+            text_str = (
+                text_val
+                if isinstance(text_val, str)
+                else ("" if text_val is None else str(text_val))
+            )
             yield {"text": text_str, "meta": meta}
 
     return _iter()
@@ -168,7 +181,9 @@ def iter_parquet_records(
                 continue
             for batch in pf.iter_batches():
                 table = pa.Table.from_batches([batch])
-                yield from _iter_rows_from_table(table, str(p), None, text_column=text_column, meta_column=meta_column)
+                yield from _iter_rows_from_table(
+                    table, str(p), None, text_column=text_column, meta_column=meta_column
+                )
 
     return _iter()
 
