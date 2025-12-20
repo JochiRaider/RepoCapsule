@@ -1,18 +1,16 @@
 import json
 import types
 
-import pytest
-
 from sievio.core.builder import _prepare_qc
-from sievio.core.config import QCConfig, QCMode, SievioConfig, SafetyConfig
+from sievio.core.config import QCConfig, QCMode, SafetyConfig, SievioConfig
 from sievio.core.interfaces import RunContext
 from sievio.core.pipeline import PipelineStats
 from sievio.core.qc_controller import (
     InlineQCController,
     InlineQCHook,
+    QCSummaryTracker,
     QualityDecisionPolicy,
     QualityInlineScreener,
-    QCSummaryTracker,
     SafetyDecisionPolicy,
     SafetyInlineScreener,
 )

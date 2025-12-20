@@ -18,7 +18,7 @@ Treat this section as the minimal "how to run checks" reference. Full installati
 ### Environment
 
 * Python: 3.11+
-* Use the project’s virtualenv (for example):
+* Use the project’s virtualenv for all commands (for example):
 
 ```bash
 # From the repo root

@@ -7,10 +7,10 @@ from sievio.core.pipeline import PipelineStats
 from sievio.core.qc_controller import (
     InlineQCController,
     InlineScreeningController,
-    QualityDecisionPolicy,
     QCSummaryTracker,
-    SafetyDecisionPolicy,
+    QualityDecisionPolicy,
     QualityInlineScreener,
+    SafetyDecisionPolicy,
     SafetyInlineScreener,
 )
 from sievio.core.records import ensure_meta_dict

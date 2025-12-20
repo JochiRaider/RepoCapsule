@@ -4,20 +4,29 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any
 
 from .config import QCConfig, QCMode, SafetyConfig
-from .interfaces import InlineScreener, QualityScorer, Record, RunLifecycleHook, RunContext, RunArtifacts, SafetyScorer
+from .interfaces import (
+    InlineScreener,
+    QualityScorer,
+    Record,
+    RunArtifacts,
+    RunContext,
+    RunLifecycleHook,
+    SafetyScorer,
+)
 from .log import get_logger
+from .qc_utils import top_dup_families, update_dup_family_counts
 from .records import (
-    ensure_meta_dict,
-    merge_meta_defaults,
     best_effort_record_path,
+    ensure_meta_dict,
     filter_qc_meta,
     filter_safety_meta,
+    merge_meta_defaults,
 )
-from .qc_utils import update_dup_family_counts, top_dup_families
 
 log = get_logger(__name__)
 _SUMMARY_SCHEMA_VERSION = 1
@@ -27,9 +36,9 @@ _SUMMARY_SCHEMA_VERSION = 1
 class ScreenDecision:
     """Decision output from a screening policy."""
 
-    candidates: Tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
     # Reasons that would trigger a drop if gates are applied.
-    would_drop: Tuple[str, ...] = ()
+    would_drop: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -47,13 +56,13 @@ class QualityDecisionPolicy:
                     low_score = False
         near_dup = bool(qc_result.get("near_dup"))
 
-        candidates: List[str] = []
+        candidates: list[str] = []
         if low_score:
             candidates.append("low_score")
         if near_dup:
             candidates.append("near_dup")
 
-        would_drop: List[str] = []
+        would_drop: list[str] = []
         if low_score:
             would_drop.append("low_score")
         if cfg.drop_near_dups and near_dup:
@@ -68,8 +77,8 @@ class SafetyDecisionPolicy:
 
     def decide(self, result: Mapping[str, Any], *, cfg: SafetyConfig | None) -> ScreenDecision:
         decision = (result.get("safety_decision") or "").lower()
-        candidates: Tuple[str, ...] = ()
-        would_drop: Tuple[str, ...] = ()
+        candidates: tuple[str, ...] = ()
+        would_drop: tuple[str, ...] = ()
         if decision == "drop":
             candidates = ("drop",)
             would_drop = ("drop",)
@@ -142,7 +151,7 @@ class ScalarSignalStats:
         self.min = v if self.min is None or v < self.min else self.min
         self.max = v if self.max is None or v > self.max else self.max
 
-    def merge_from(self, other: "ScalarSignalStats") -> None:
+    def merge_from(self, other: ScalarSignalStats) -> None:
         if other.count <= 0:
             return
         if self.count == 0:
@@ -160,7 +169,7 @@ class ScalarSignalStats:
         if other.max is not None:
             self.max = other.max if self.max is None or other.max > self.max else self.max
 
-    def clone(self) -> "ScalarSignalStats":
+    def clone(self) -> ScalarSignalStats:
         stats = ScalarSignalStats()
         stats.count = self.count
         stats.sum = self.sum
@@ -169,7 +178,7 @@ class ScalarSignalStats:
         stats.max = self.max
         return stats
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         if self.count == 0:
             return {"count": 0}
         mean = self.sum / self.count
@@ -197,12 +206,12 @@ class ScreenerStats:
     kept: int = 0
     dropped: int = 0
     errors: int = 0
-    signal_stats: Dict[str, ScalarSignalStats] = field(default_factory=dict)
-    flags: Dict[str, int] = field(default_factory=dict)
-    candidates: Dict[str, int] = field(default_factory=dict)
-    drops: Dict[str, int] = field(default_factory=dict)
+    signal_stats: dict[str, ScalarSignalStats] = field(default_factory=dict)
+    flags: dict[str, int] = field(default_factory=dict)
+    candidates: dict[str, int] = field(default_factory=dict)
+    drops: dict[str, int] = field(default_factory=dict)
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "enabled": bool(self.enabled),
@@ -224,7 +233,7 @@ class ScreenerStats:
         *,
         default_id: str | None = None,
         strict: bool = False,
-    ) -> "ScreenerStats":
+    ) -> ScreenerStats:
         sid = _coerce_str(data.get("id") or default_id or "", strict=strict)
         stats = cls(id=sid)
         stats.enabled = _coerce_bool(data.get("enabled"), strict=strict)
@@ -237,7 +246,7 @@ class ScreenerStats:
         stats.errors = _coerce_int(data.get("errors"), strict=strict)
         signals = data.get("signal_stats")
         if isinstance(signals, Mapping):
-            parsed: Dict[str, ScalarSignalStats] = {}
+            parsed: dict[str, ScalarSignalStats] = {}
             for name, payload in signals.items():
                 if not isinstance(payload, Mapping):
                     continue
@@ -254,7 +263,7 @@ class ScreenerStats:
             stats.drops = {str(k): _coerce_int(v, strict=strict) for k, v in drops.items() if v is not None}
         return stats
 
-    def clone(self) -> "ScreenerStats":
+    def clone(self) -> ScreenerStats:
         stats = ScreenerStats(id=self.id)
         stats.enabled = self.enabled
         stats.mode = self.mode
@@ -268,7 +277,7 @@ class ScreenerStats:
         stats.drops = dict(self.drops)
         return stats
 
-    def merge_from(self, other: "ScreenerStats") -> None:
+    def merge_from(self, other: ScreenerStats) -> None:
         self.enabled = self.enabled or other.enabled
         if other.mode:
             self.mode = other.mode
@@ -318,22 +327,22 @@ class QCSummaryTracker:
     """
     enabled: bool = False
     mode: str = QCMode.INLINE
-    min_score: Optional[float] = None
+    min_score: float | None = None
     drop_near_dups: bool = False
-    dup_families: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    top_dup_snapshot: List[Dict[str, Any]] = field(default_factory=list)
-    screeners: Dict[str, ScreenerStats] = field(default_factory=dict)
+    dup_families: dict[str, dict[str, Any]] = field(default_factory=dict)
+    top_dup_snapshot: list[dict[str, Any]] = field(default_factory=list)
+    screeners: dict[str, ScreenerStats] = field(default_factory=dict)
 
     def __init__(
         self,
         *,
         enabled: bool = False,
         mode: str = QCMode.INLINE,
-        min_score: Optional[float] = None,
+        min_score: float | None = None,
         drop_near_dups: bool = False,
         screeners: Mapping[str, ScreenerStats | Mapping[str, Any]] | None = None,
-        dup_families: Mapping[str, Dict[str, Any]] | None = None,
-        top_dup_snapshot: List[Dict[str, Any]] | None = None,
+        dup_families: Mapping[str, dict[str, Any]] | None = None,
+        top_dup_snapshot: list[dict[str, Any]] | None = None,
     ) -> None:
         self.enabled = bool(enabled)
         self.mode = mode
@@ -354,7 +363,7 @@ class QCSummaryTracker:
         *,
         enabled: bool = False,
         mode: str = QCMode.INLINE,
-        min_score: Optional[float] = None,
+        min_score: float | None = None,
         drop_near_dups: bool = False,
     ) -> None:
         """Reconfigure tracker fields and clear per-run state in place."""
@@ -413,7 +422,7 @@ class QCSummaryTracker:
         stats.enabled = True
         stats.errors += 1
 
-    def as_dict(self) -> Dict[str, Any]:
+    def as_dict(self) -> dict[str, Any]:
         """Return a summary dictionary suitable for serialization."""
         return {
             "schema_version": _SUMMARY_SCHEMA_VERSION,
@@ -438,7 +447,7 @@ class QCSummaryTracker:
         other = QCSummaryTracker.from_summary_dict(summary, strict=strict)
         self.merge(other, replace_screeners=replace_screeners)
 
-    def _is_low_score(self, qc_result: Dict[str, Any]) -> bool:
+    def _is_low_score(self, qc_result: dict[str, Any]) -> bool:
         """Return True when qc_result score falls below the configured min."""
         if self.min_score is None:
             return False
@@ -450,14 +459,14 @@ class QCSummaryTracker:
         except Exception:
             return False
 
-    def top_dup_families(self) -> List[Dict[str, Any]]:
+    def top_dup_families(self) -> list[dict[str, Any]]:
         """Return the largest duplicate families with cached snapshot reuse."""
         if self.top_dup_snapshot:
             return [dict(entry) for entry in self.top_dup_snapshot]
         return top_dup_families(self.dup_families)
 
     @classmethod
-    def from_summary_dict(cls, data: Mapping[str, Any], *, strict: bool = False) -> "QCSummaryTracker":
+    def from_summary_dict(cls, data: Mapping[str, Any], *, strict: bool = False) -> QCSummaryTracker:
         """Rehydrate a tracker from a serialized summary dictionary.
 
         Args:
@@ -577,7 +586,7 @@ class QCSummaryTracker:
     def _increment_drop(self, screener: ScreenerStats, key: str) -> None:
         screener.drops[key] = screener.drops.get(key, 0) + 1
 
-    def merge(self, other: "QCSummaryTracker", *, replace_screeners: set[str] | None = None) -> None:
+    def merge(self, other: QCSummaryTracker, *, replace_screeners: set[str] | None = None) -> None:
         """Merge another tracker into this instance."""
         if other is self:
             return
@@ -768,14 +777,14 @@ class InlineScreeningController:
         if enforce is None:
             return
         try:
-            setattr(screener, "enforce_drops", enforce)
+            screener.enforce_drops = enforce
         except Exception:
             return
 
     def _sync_screeners(self) -> None:
         for screener in self.screeners:
             try:
-                setattr(screener, "summary", self.summary)
+                screener.summary = self.summary
             except Exception:
                 continue
 
@@ -826,7 +835,7 @@ class QualityInlineScreener:
                 self.logger.warning("QC post-processing failed for %s: %s", path, exc)
             return None if self.enforce_drops else self._mark_qc_error(record)
 
-    def _merge_qc_meta(self, record: Record, qc_result: Dict[str, Any]) -> Record:
+    def _merge_qc_meta(self, record: Record, qc_result: dict[str, Any]) -> Record:
         """Attach QC-derived metadata to the record meta dictionary."""
 
         if not isinstance(record, dict):
@@ -1123,7 +1132,7 @@ class InlineQCHook(RunLifecycleHook):
             reset_fn(stats)
         self._qc_cfg = getattr(self._controller, "cfg", self._qc_cfg)
         try:
-            self._safety_cfg = getattr(self._controller, "safety_cfg")
+            self._safety_cfg = self._controller.safety_cfg
         except Exception:
             pass
 
@@ -1154,7 +1163,7 @@ class InlineQCHook(RunLifecycleHook):
         return record
 
 
-def _derive_csv_path(jsonl_path: Optional[str], suffix: Optional[str]) -> Optional[str]:
+def _derive_csv_path(jsonl_path: str | None, suffix: str | None) -> str | None:
     """Derive a QC CSV path from a primary JSONL path and suffix."""
 
     if not jsonl_path:
@@ -1169,14 +1178,14 @@ def _derive_csv_path(jsonl_path: Optional[str], suffix: Optional[str]) -> Option
 
 
 def summarize_qc_rows(
-    rows: Iterable[Dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     *,
     mode: str,
-    min_score: Optional[float],
+    min_score: float | None,
     drop_near_dups: bool,
     apply_gates: bool = False,
     enabled: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a summary dictionary from QC rows for post-processing mode.
 
     Args:
