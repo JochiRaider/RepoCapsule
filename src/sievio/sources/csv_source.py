@@ -65,11 +65,15 @@ class CSVTextSource(Source):
                     if self.has_header:
                         reader = csv.DictReader(fp, delimiter=dialect_delim)
                         for lineno, row in enumerate(reader, start=2):
-                            yield from self._row_to_fileitems(row=row, path=path, lineno=lineno)
+                            yield from self._row_to_fileitems(
+                                row=row, path=path, lineno=lineno
+                            )
                     else:
                         reader = csv.reader(fp, delimiter=dialect_delim)
                         for lineno, row in enumerate(reader, start=1):
-                            yield from self._row_to_fileitems_no_header(row=row, path=path, lineno=lineno)
+                            yield from self._row_to_fileitems_no_header(
+                                row=row, path=path, lineno=lineno
+                            )
             except FileNotFoundError:
                 log.warning("CSV file not found: %s", path)
             except Exception as exc:
@@ -84,7 +88,9 @@ class CSVTextSource(Source):
             return "\t"
         return ","
 
-    def _row_to_fileitems(self, *, row: dict[str, Any], path: Path, lineno: int) -> Iterable[FileItem]:
+    def _row_to_fileitems(
+        self, *, row: dict[str, Any], path: Path, lineno: int
+    ) -> Iterable[FileItem]:
         """Create file items from a dict row using the configured column.
 
         Args:
@@ -102,7 +108,9 @@ class CSVTextSource(Source):
         data = text.encode("utf-8")
         yield FileItem(path=rel, data=data, size=len(data))
 
-    def _row_to_fileitems_no_header(self, *, row: Sequence[str], path: Path, lineno: int) -> Iterable[FileItem]:
+    def _row_to_fileitems_no_header(
+        self, *, row: Sequence[str], path: Path, lineno: int
+    ) -> Iterable[FileItem]:
         """Create file items from a row when no header is present.
 
         Args:

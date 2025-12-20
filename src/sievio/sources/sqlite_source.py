@@ -199,7 +199,9 @@ class SQLiteSource(Source):
         req = urllib.request.Request(self.db_url, headers={"User-Agent": _USER_AGENT})
         timeout = self.download_timeout
         try:
-            with client.open_with_retries(req, timeout=timeout, retries=self.retries) as resp:
+            with client.open_with_retries(
+                req, timeout=timeout, retries=self.retries
+            ) as resp:
                 if resp.status >= 400:
                     raise urllib.error.HTTPError(
                         self.db_url, resp.status, resp.reason, resp.headers, None
@@ -210,7 +212,8 @@ class SQLiteSource(Source):
                         content_len = int(length_header)
                         if content_len > self.download_max_bytes:
                             raise ValueError(
-                                f"Content length {content_len} exceeds limit {self.download_max_bytes}"
+                                f"Content length {content_len} exceeds limit "
+                                f"{self.download_max_bytes}"
                             )
                     except ValueError:
                         raise
@@ -226,7 +229,10 @@ class SQLiteSource(Source):
                                 break
                             fp.write(chunk)
                             total += len(chunk)
-                            if self.download_max_bytes is not None and total > self.download_max_bytes:
+                            if (
+                                self.download_max_bytes is not None
+                                and total > self.download_max_bytes
+                            ):
                                 raise ValueError(
                                     f"Download exceeded max bytes ({self.download_max_bytes})"
                                 )

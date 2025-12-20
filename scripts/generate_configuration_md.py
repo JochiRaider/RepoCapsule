@@ -8,13 +8,12 @@ Run:
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import MISSING, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 
 ROOT = Path(__file__).resolve().parents[1]
-import sys
-
 sys.path.insert(0, str(ROOT / "src"))
 
 from sievio.core import config as cfg  # noqa: E402

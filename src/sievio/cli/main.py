@@ -48,14 +48,23 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_p = subparsers.add_parser("run", help="Run from a config file")
-    run_p.add_argument("-c", "--config", required=True, help="Path to config file (TOML or JSON).")
+    run_p.add_argument(
+        "-c",
+        "--config",
+        required=True,
+        help="Path to config file (TOML or JSON).",
+    )
     run_p.add_argument("--override-max-workers", type=int, help="Override pipeline.max_workers.")
     run_p.add_argument(
         "--override-executor-kind",
         choices=["auto", "thread", "process"],
         help="Override pipeline.executor_kind.",
     )
-    run_p.add_argument("--dry-run", action="store_true", help="Validate and print config, then exit.")
+    run_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and print config, then exit.",
+    )
 
     local_p = subparsers.add_parser("local", help="Run local directory -> JSONL.")
     local_p.add_argument("root_dir", help="Root directory to process.")
@@ -88,7 +97,12 @@ def _build_parser() -> argparse.ArgumentParser:
     shard_p.add_argument("--targets", required=True, type=Path, help="File of targets.")
     shard_p.add_argument("--base", required=True, type=Path, help="Base config TOML/JSON.")
     shard_p.add_argument("--shards", required=True, type=int, help="Number of shards.")
-    shard_p.add_argument("--out-dir", required=True, type=Path, help="Output directory for shard configs.")
+    shard_p.add_argument(
+        "--out-dir",
+        required=True,
+        type=Path,
+        help="Output directory for shard configs.",
+    )
     shard_p.add_argument(
         "--kind",
         required=True,
@@ -144,7 +158,11 @@ def _cmd_shard(args: argparse.Namespace) -> int:
     """Generate sharded configs from a base config and targets list."""
     cfg = load_config_from_path(args.base)
     raw_lines = args.targets.read_text("utf-8").splitlines()
-    targets = [line.strip() for line in raw_lines if line.strip() and not line.strip().startswith("#")]
+    targets = [
+        line.strip()
+        for line in raw_lines
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +272,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         try:
             summary = _run_post_qc(str(jsonl_path), cfg)
         except Exception as exc:  # noqa: BLE001
-            msg = "QC extras are required for this command." if JSONLQualityScorer is None else str(exc)
+            msg = (
+                "QC extras are required for this command."
+                if JSONLQualityScorer is None
+                else str(exc)
+            )
             print(msg, file=sys.stderr)
             return 1
         if args.csv:

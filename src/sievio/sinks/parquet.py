@@ -90,7 +90,9 @@ class ParquetDatasetSink(Sink):
                 if self._overwrite:
                     self._target.unlink()
                 else:
-                    raise FileExistsError(f"Parquet dataset path {self._target} already exists as a file")
+                    raise FileExistsError(
+                        f"Parquet dataset path {self._target} already exists as a file"
+                    )
             self._target.mkdir(parents=True, exist_ok=True)
         else:
             self._target.parent.mkdir(parents=True, exist_ok=True)

@@ -217,14 +217,18 @@ class WebPdfListSource(Source):
                 backoff_factor=2.0,
             ) as resp:
                 if resp.status >= 400:
-                    raise urllib.error.HTTPError(url, resp.status, resp.reason, resp.headers, None)
+                    raise urllib.error.HTTPError(
+                        url, resp.status, resp.reason, resp.headers, None
+                    )
                 headers = {k: v for k, v in resp.headers.items()}
                 # Content-Length guard if present
                 cl = headers.get("Content-Length")
                 if cl:
                     try:
                         if int(cl) > self.max_pdf_bytes:
-                            raise RuntimeError(f"Content-Length {cl} exceeds cap {self.max_pdf_bytes}")
+                            raise RuntimeError(
+                                f"Content-Length {cl} exceeds cap {self.max_pdf_bytes}"
+                            )
                     except Exception as exc:
                         log.debug(
                             "Ignoring invalid Content-Length %r for %s: %s",
@@ -304,7 +308,11 @@ class WebPdfListSource(Source):
         if not name.lower().endswith(".pdf"):
             name = f"{name}.pdf"
 
-        sniff_head = bytes.fromhex(headers.get("_X-SNIFF", "")) if headers.get("_X-SNIFF") else data[:8]
+        sniff_head = (
+            bytes.fromhex(headers.get("_X-SNIFF", ""))
+            if headers.get("_X-SNIFF")
+            else data[:8]
+        )
         if self.require_pdf and not _looks_like_pdf(sniff_head):
             if not _looks_like_pdf(data[:8]):
                 return None
@@ -366,12 +374,17 @@ class WebPdfListSource(Source):
 
         results: dict[int, FileItem] = {}
 
-        def _worker(task: _PdfDownloadTask) -> tuple[_PdfDownloadTask, list[tuple[str, bytes, dict[str, str], int]]]:
+        def _worker(
+            task: _PdfDownloadTask,
+        ) -> tuple[_PdfDownloadTask, list[tuple[str, bytes, dict[str, str], int]]]:
             result = self._download(task.url)
             data, headers, file_size = self._normalize_download_result(result)
             return task, [(task.url, data, headers, file_size)]
 
-        def _writer(task: _PdfDownloadTask, payloads: Iterable[tuple[str, bytes, dict[str, str], int]]) -> None:
+        def _writer(
+            task: _PdfDownloadTask,
+            payloads: Iterable[tuple[str, bytes, dict[str, str], int]],
+        ) -> None:
             nonlocal success_count, skipped_count
             for url, data, headers, file_size in payloads:
                 item = self._build_file_item(url, data, headers, used_names, file_size)
@@ -496,11 +509,19 @@ class WebPagePdfSource(Source):
         self._pdf_config = cfg
         self.page_url = page_url
         self.same_domain = bool(same_domain)
-        self.max_links = max(1, int(max_links if max_links is not None else cfg.max_links))
+        self.max_links = max(
+            1, int(max_links if max_links is not None else cfg.max_links)
+        )
         self.match = re.compile(match_regex) if match_regex else None
-        self.include_ambiguous = cfg.include_ambiguous if include_ambiguous is None else bool(include_ambiguous)
+        self.include_ambiguous = (
+            cfg.include_ambiguous
+            if include_ambiguous is None
+            else bool(include_ambiguous)
+        )
         self.timeout = int(timeout if timeout is not None else cfg.timeout)
-        self.max_pdf_bytes = int(max_pdf_bytes if max_pdf_bytes is not None else cfg.max_pdf_bytes)
+        self.max_pdf_bytes = int(
+            max_pdf_bytes if max_pdf_bytes is not None else cfg.max_pdf_bytes
+        )
         self.require_pdf = cfg.require_pdf if require_pdf is None else bool(require_pdf)
         self.add_prefix = add_prefix
         self.retries = max(0, int(retries if retries is not None else cfg.retries))
@@ -517,7 +538,10 @@ class WebPagePdfSource(Source):
         safe_url = _ensure_http_url(url)
         return urllib.request.Request(
             safe_url,
-            headers={"User-Agent": self._user_agent, "Accept": "text/html,application/xhtml+xml,*/*;q=0.9"},
+            headers={
+                "User-Agent": self._user_agent,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+            },
             method="GET",
         )
 
@@ -531,7 +555,9 @@ class WebPagePdfSource(Source):
             backoff_factor=2.0,
         ) as r:
             if r.status >= 400:
-                raise urllib.error.HTTPError(self.page_url, r.status, r.reason, r.headers, None)
+                raise urllib.error.HTTPError(
+                    self.page_url, r.status, r.reason, r.headers, None
+                )
             raw = r.read(5 * 1024 * 1024)  # 5 MiB cap
             ct = r.headers.get_content_charset() or "utf-8"
         try:

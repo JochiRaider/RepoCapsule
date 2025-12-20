@@ -194,7 +194,9 @@ def _rate_limit_note(headers: dict[str, Any]) -> str:
 # Repo info / license API
 # -----------------------
 
-def get_repo_info(spec: RepoSpec, *, client: safe_http.SafeHttpClient | None = None) -> dict[str, Any]:
+def get_repo_info(
+    spec: RepoSpec, *, client: safe_http.SafeHttpClient | None = None
+) -> dict[str, Any]:
     """Retrieves repository metadata and license information.
 
     Args:
@@ -238,14 +240,21 @@ def get_repo_info(spec: RepoSpec, *, client: safe_http.SafeHttpClient | None = N
         if isinstance(licobj, dict) and licobj.get("path"):
             out["license_path"] = licobj.get("path")
     elif status in (403, 429):
-        log.warning("GitHub license API throttled for %s: HTTP %s%s", spec.full_name, status, _rate_limit_note(headers))
+        log.warning(
+            "GitHub license API throttled for %s: HTTP %s%s",
+            spec.full_name,
+            status,
+            _rate_limit_note(headers),
+        )
     else:
         log.info("No license info for %s (HTTP %s)", spec.full_name, status)
 
     return out
 
 
-def get_repo_license_spdx(spec: RepoSpec, *, client: safe_http.SafeHttpClient | None = None) -> str | None:
+def get_repo_license_spdx(
+    spec: RepoSpec, *, client: safe_http.SafeHttpClient | None = None
+) -> str | None:
     """Fetches the SPDX license identifier for a repository if available.
 
     Args:
@@ -352,7 +361,7 @@ def download_zipball_to_temp(
                     pass
                 raise
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Network error downloading zipball: {e}")
+        raise RuntimeError(f"Network error downloading zipball: {e}") from e
 
 
 def detect_license_for_github_repo(
@@ -500,18 +509,28 @@ def iter_zip_members(
             comp_sz = int(getattr(zi, "compress_size", 0) or 0)
             file_sz = int(getattr(zi, "file_size", 0) or 0)
             if comp_sz > 0 and file_sz / max(1, comp_sz) > max_compression_ratio:
-                log.warning("Skipping %s: suspicious compression ratio (%.1fx)",
-                            rel, file_sz / max(1, comp_sz))
+                log.warning(
+                    "Skipping %s: suspicious compression ratio (%.1fx)",
+                    rel,
+                    file_sz / max(1, comp_sz),
+                )
                 continue
 
             if max_bytes_per_file is not None and file_sz > max_bytes_per_file:
                 # Too big; skip without reading
-                log.debug("Skipping %s: file_size=%d > per-file cap=%d",
-                          rel, file_sz, max_bytes_per_file)
+                log.debug(
+                    "Skipping %s: file_size=%d > per-file cap=%d",
+                    rel,
+                    file_sz,
+                    max_bytes_per_file,
+                )
                 continue
 
-            projected_total = total + (min(file_sz, max_bytes_per_file)
-                                       if max_bytes_per_file is not None else file_sz)
+            projected_total = total + (
+                min(file_sz, max_bytes_per_file)
+                if max_bytes_per_file is not None
+                else file_sz
+            )
             if projected_total > max_total_uncompressed:
                 raise RuntimeError("Total uncompressed bytes would exceed safety limit; aborting")
 
@@ -520,7 +539,11 @@ def iter_zip_members(
                 remaining = max_bytes_per_file if max_bytes_per_file is not None else None
                 parts: list[bytes] = []
                 while True:
-                    to_read = 1024 * 1024 if remaining is None else min(1024 * 1024, max(0, remaining))
+                    to_read = (
+                        1024 * 1024
+                        if remaining is None
+                        else min(1024 * 1024, max(0, remaining))
+                    )
                     if to_read == 0:
                         break
                     chunk = fh.read(to_read)
