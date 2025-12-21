@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pickle
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field, replace
@@ -16,7 +17,7 @@ from .concurrency import (
     process_items_parallel,
     resolve_pipeline_executor_config,
 )
-from .config import FileProcessingConfig, SievioConfig
+from .config import FileProcessingConfig, QCConfig, QCMode, SafetyConfig, SievioConfig
 from .convert import (
     _OPEN_STREAM_DEFAULT_MAX_BYTES,
     DefaultExtractor,
@@ -37,7 +38,8 @@ from .interfaces import (
     Source,
 )
 from .log import get_logger
-from .qc_controller import QCSummaryTracker
+from .factories_qc import make_qc_scorer, make_safety_scorer
+from .qc_controller import InlineQCController, InlineQCHook, QCSummaryTracker
 from .records import best_effort_record_path
 
 log = get_logger(__name__)
@@ -58,6 +60,25 @@ class ErrorRateExceeded(RuntimeError):
 class _WorkItem:
     item: Any
     ctx: RepoContext | None
+
+
+_WORKER_INLINE_QC = threading.local()
+
+
+@dataclass(frozen=True, slots=True)
+class _InlineQCWorkerSpec:
+    qc_cfg: QCConfig | None
+    safety_cfg: SafetyConfig | None
+    scorer: Any | None
+    safety_scorer: Any | None
+    executor_kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerResult:
+    item: Any
+    records: Iterable[Record]
+    qc_summary: QCSummaryTracker | None = None
 
 
 class _FuncRecordMiddleware:
@@ -126,6 +147,70 @@ def _coerce_file_middleware(
 ) -> FileMiddleware:
     """Wrap a bare callable as FileMiddleware when needed."""
     return mw if hasattr(mw, "process") else _FuncFileMiddleware(mw)
+
+
+def _build_inline_qc_worker_controller(
+    spec: _InlineQCWorkerSpec,
+) -> InlineQCController | None:
+    qc_cfg = spec.qc_cfg
+    safety_cfg = spec.safety_cfg
+    scorer = spec.scorer
+    safety_scorer = spec.safety_scorer
+
+    if scorer is not None:
+        clone = getattr(scorer, "clone_for_parallel", None)
+        if callable(clone):
+            scorer = clone()
+    if safety_scorer is not None:
+        clone = getattr(safety_scorer, "clone_for_parallel", None)
+        if callable(clone):
+            safety_scorer = clone()
+
+    if scorer is None and qc_cfg is not None:
+        scorer = make_qc_scorer(qc_cfg, new_instance=True)
+    if safety_scorer is None and safety_cfg is not None:
+        safety_scorer = make_safety_scorer(safety_cfg, new_instance=True)
+
+    if scorer is None and safety_scorer is None:
+        return None
+
+    return InlineQCController(
+        config=qc_cfg or QCConfig(),
+        stats=None,
+        scorer=scorer,
+        logger=log,
+        enforce_drops=bool(qc_cfg and qc_cfg.mode == QCMode.INLINE),
+        safety_scorer=safety_scorer,
+        safety_cfg=safety_cfg,
+    )
+
+
+def _get_inline_qc_worker_controller(
+    spec: _InlineQCWorkerSpec,
+) -> InlineQCController | None:
+    cache = getattr(_WORKER_INLINE_QC, "controller", None)
+    if cache is not None and getattr(_WORKER_INLINE_QC, "spec_id", None) == id(spec):
+        return cache
+    controller = _build_inline_qc_worker_controller(spec)
+    _WORKER_INLINE_QC.controller = controller
+    _WORKER_INLINE_QC.spec_id = id(spec)
+    return controller
+
+
+def _apply_inline_qc_in_worker(
+    spec: _InlineQCWorkerSpec,
+    records: Iterable[Record],
+) -> tuple[list[Record], QCSummaryTracker | None]:
+    controller = _get_inline_qc_worker_controller(spec)
+    if controller is None:
+        return list(records), None
+    controller.reset(stats=None, qc_cfg=spec.qc_cfg, safety_cfg=spec.safety_cfg)
+    out: list[Record] = []
+    for record in records:
+        result = controller.process_record(record)
+        if result is not None:
+            out.append(result)
+    return out, controller.tracker
 
 
 @dataclass
@@ -414,6 +499,8 @@ class PipelineEngine:
         self._record_chain: list[Callable[[Record], Record | None]] = []
         self._record_chain_dirty = True
         self._middlewares_normalized = False
+        self._inline_qc_worker: _InlineQCWorkerSpec | None = None
+        self._skip_inline_qc_hooks = False
         rt = getattr(plan, "runtime", None)
         if rt and getattr(rt, "record_middlewares", None):
             for mw in rt.record_middlewares:
@@ -536,6 +623,8 @@ class PipelineEngine:
         def _step(record: Record) -> Record | None:
             rec: Record | None = record
             for hook in self._hooks:
+                if self._skip_inline_qc_hooks and isinstance(hook, InlineQCHook):
+                    continue
                 if rec is None:
                     break
                 try:
@@ -662,6 +751,86 @@ class PipelineEngine:
             )
         return Executor(exec_cfg, allow_fallback=True), fail_fast
 
+    def _merge_inline_qc_summary(self, summary: QCSummaryTracker | None) -> None:
+        if summary is None:
+            return
+        try:
+            self.stats.qc.merge(summary)
+        except Exception:
+            self.log.debug("Failed to merge inline QC summary payload", exc_info=True)
+
+    def _build_inline_qc_worker_spec(
+        self,
+        *,
+        executor_kind: str,
+    ) -> _InlineQCWorkerSpec:
+        qc_cfg = self.config.qc
+        safety_cfg = getattr(qc_cfg, "safety", None)
+        worker_safety = replace(safety_cfg, scorer=None) if safety_cfg is not None else None
+        worker_qc = replace(qc_cfg, scorer=None, safety=worker_safety)
+        scorer = qc_cfg.scorer if executor_kind == "thread" else None
+        safety_scorer = safety_cfg.scorer if executor_kind == "thread" else None
+        return _InlineQCWorkerSpec(
+            qc_cfg=worker_qc,
+            safety_cfg=worker_safety,
+            scorer=scorer,
+            safety_scorer=safety_scorer,
+            executor_kind=executor_kind,
+        )
+
+    def _can_use_parallel_inline_qc(self, *, executor_kind: str, max_workers: int) -> bool:
+        qc_cfg = self.config.qc
+        safety_cfg = getattr(qc_cfg, "safety", None)
+        inline_qc = qc_cfg.enabled and qc_cfg.mode in {QCMode.INLINE, QCMode.ADVISORY}
+        inline_safety = (
+            bool(safety_cfg)
+            and safety_cfg.enabled
+            and safety_cfg.mode in {QCMode.INLINE, QCMode.ADVISORY}
+        )
+        if not getattr(qc_cfg, "parallel_inline", False):
+            return False
+        if not (inline_qc or inline_safety):
+            return False
+        if max_workers <= 1:
+            return False
+        if (
+            self.record_middlewares
+            or self.file_middlewares
+            or self.before_record_hooks
+            or self.after_record_hooks
+            or self.record_filter_hooks
+        ):
+            self.log.warning(
+                "QC parallel_inline requested but record/file middlewares or record hooks are "
+                "present; falling back to main-thread inline QC."
+            )
+            return False
+        if any(not isinstance(hook, InlineQCHook) for hook in self._hooks):
+            self.log.warning(
+                "QC parallel_inline requested but non-QC lifecycle hooks are present; "
+                "falling back to main-thread inline QC."
+            )
+            return False
+        if executor_kind == "thread":
+            scorer = getattr(qc_cfg, "scorer", None)
+            if scorer is not None and not callable(getattr(scorer, "clone_for_parallel", None)):
+                self.log.warning(
+                    "QC parallel_inline requested but quality scorer lacks clone_for_parallel; "
+                    "falling back to main-thread inline QC."
+                )
+                return False
+            if inline_safety:
+                safety_scorer = getattr(safety_cfg, "scorer", None) if safety_cfg else None
+                if safety_scorer is not None and not callable(
+                    getattr(safety_scorer, "clone_for_parallel", None)
+                ):
+                    self.log.warning(
+                        "QC parallel_inline requested but safety scorer lacks clone_for_parallel; "
+                        "falling back to main-thread inline QC."
+                    )
+                    return False
+        return True
+
     def _write_records(
         self,
         item: Any,
@@ -779,6 +948,12 @@ class PipelineEngine:
         self.stats.attempted_files += 1
         try:
             _, raw_recs = processor(work)
+            if self._inline_qc_worker is not None:
+                raw_recs, qc_summary = _apply_inline_qc_in_worker(
+                    self._inline_qc_worker,
+                    raw_recs,
+                )
+                self._merge_inline_qc_summary(qc_summary)
             recs = self._apply_file_middlewares(work.item, raw_recs)
             if recs is not None:
                 self._write_records(work.item, recs, sinks=sinks)
@@ -818,6 +993,7 @@ class PipelineEngine:
         stats = self.stats
         log = self.log
         exec_cfg = executor.cfg
+        inline_qc_worker = self._inline_qc_worker
 
         def _log_pickling_hint(exc: BaseException) -> None:
             if exec_cfg.kind != "process":
@@ -833,8 +1009,19 @@ class PipelineEngine:
                 stats.attempted_files += 1
                 yield work
 
-        def _process_one(work: _WorkItem) -> tuple[Any, Iterable[Record]]:
-            return processor(work)
+        def _process_one(work: _WorkItem) -> _WorkerResult:
+            item, raw_recs = processor(work)
+            if inline_qc_worker is not None:
+                recs, qc_summary = _apply_inline_qc_in_worker(inline_qc_worker, raw_recs)
+                return _WorkerResult(item=item, records=recs, qc_summary=qc_summary)
+            return _WorkerResult(item=item, records=raw_recs)
+
+        def _normalize_result(result: Any) -> _WorkerResult:
+            if isinstance(result, _WorkerResult):
+                return result
+            if isinstance(result, tuple) and len(result) == 2:
+                return _WorkerResult(item=result[0], records=result[1])
+            return _WorkerResult(item=result, records=())
 
         def _on_worker_error(exc: BaseException) -> None:
             log.warning("Worker failed: %s", exc)
@@ -842,8 +1029,11 @@ class PipelineEngine:
             stats.source_errors += 1
             self._maybe_abort_for_error_rate(exc)
 
-        def _on_result(result: tuple[Any, Iterable[Record]]) -> None:
-            item, raw_recs = result
+        def _on_result(result: tuple[Any, Iterable[Record]] | _WorkerResult) -> None:
+            worker_result = _normalize_result(result)
+            self._merge_inline_qc_summary(worker_result.qc_summary)
+            item = worker_result.item
+            raw_recs = worker_result.records
             recs = self._apply_file_middlewares(item, raw_recs)
             if recs is not None:
                 self._write_records(item, recs, sinks=sinks)
@@ -996,6 +1186,16 @@ class PipelineEngine:
                     self.log.warning("No sinks are open; processed records will be dropped.")
 
                 executor, fail_fast = self._build_executor()
+                self._inline_qc_worker = None
+                self._skip_inline_qc_hooks = False
+                if self._can_use_parallel_inline_qc(
+                    executor_kind=executor.cfg.kind,
+                    max_workers=executor.cfg.max_workers,
+                ):
+                    self._inline_qc_worker = self._build_inline_qc_worker_spec(
+                        executor_kind=executor.cfg.kind
+                    )
+                    self._skip_inline_qc_hooks = True
                 materialize_results = executor.cfg.kind == "process"
                 processor = self._make_processor(
                     materialize=materialize_results,

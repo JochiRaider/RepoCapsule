@@ -504,6 +504,7 @@ class QCHeuristics:
     simhash_window: int = 128
     simhash_max_tokens: int | None = 20000
     simhash_hamm_thresh: int | None = None
+    parse_max_bytes: int | None = 200000
     enable_minhash: bool | None = None
     minhash_perms: int | None = None
     minhash_bands: int | None = None
@@ -527,6 +528,7 @@ class QCHeuristics:
             ("code_short_line_threshold", self.code_short_line_threshold),
             ("simhash_window", self.simhash_window),
             ("simhash_max_tokens", self.simhash_max_tokens),
+            ("parse_max_bytes", self.parse_max_bytes),
             ("minhash_max_shingles", self.minhash_max_shingles),
         ]
         for name, value in numeric_positive:
@@ -632,6 +634,7 @@ class QCConfig:
     Concurrency:
     * ``parallel_post`` enables post-QC scoring via
     ``process_items_parallel``.
+    * ``parallel_inline`` enables worker-side inline QC when supported.
     * ``post_*`` knobs override pipeline concurrency for post-QC; when
     None, they inherit from :class:`PipelineConfig`.
     """
@@ -641,6 +644,7 @@ class QCConfig:
     write_signals_sidecar: bool = False
     signals_suffix: str | None = None
     signals_format: Literal["csv", "parquet"] = "csv"
+    parallel_inline: bool = False
     scorer: Any | None = None  # optional extra
     scorer_id: str | None = None  # None → registry default (first registered scorer)
     scorer_options: dict[str, Any] = field(default_factory=dict)

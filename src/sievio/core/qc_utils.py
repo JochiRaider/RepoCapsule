@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import random
 import json
 import math
 import os
-import random
 import re
 import zlib
 from collections import defaultdict, deque
@@ -431,10 +431,28 @@ class SimHashWindowIndex:
 
 # ---------- MinHash + LSH ----------
 _PRIME32 = 4294967311
-_RNG = random.Random(0x5EED5EED)
-_MINHASH_COEF: list[tuple[int, int]] = [
-    (_RNG.randrange(1, _PRIME32 - 1), _RNG.randrange(0, _PRIME32 - 1)) for _ in range(128)
-]
+_MINHASH_SEED = 0x5EED5EED
+_MINHASH_MAX_PERMS = 8192
+_MINHASH_RNG = random.Random(_MINHASH_SEED)
+_MINHASH_COEFS: list[tuple[int, int]] = []
+
+
+def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
+    """Return deterministic MinHash coefficients for a given permutation count."""
+    if n_perm < 0:
+        raise ValueError(f"n_perm must be non-negative; got {n_perm!r}.")
+    if n_perm > _MINHASH_MAX_PERMS:
+        raise ValueError(
+            f"n_perm must be <= {_MINHASH_MAX_PERMS}; got {n_perm!r}."
+        )
+    if n_perm == 0:
+        return []
+    if len(_MINHASH_COEFS) < n_perm:
+        for _ in range(len(_MINHASH_COEFS), n_perm):
+            a = _MINHASH_RNG.randrange(1, _PRIME32 - 1)
+            b = _MINHASH_RNG.randrange(0, _PRIME32 - 1)
+            _MINHASH_COEFS.append((a, b))
+    return _MINHASH_COEFS[:n_perm]
 
 
 def _shingle_hashes(text: str, k: int = 5, *, max_shingles: int | None = None) -> set[int]:
@@ -442,11 +460,13 @@ def _shingle_hashes(text: str, k: int = 5, *, max_shingles: int | None = None) -
     if len(text) < k:
         return set()
     out: set[int] = set()
-    enc = text.encode("utf-8", "ignore")
     if max_shingles is None:
         max_shingles = _DEFAULT_MINHASH_MAX_SHINGLES
     if max_shingles is not None and max_shingles <= 0:
         max_shingles = None
+    if max_shingles is not None:
+        text = text[: max_shingles + k - 1]
+    enc = text.encode("utf-8", "ignore")
     if max_shingles is not None:
         total = len(enc) - k + 1
         if total > max_shingles:
@@ -463,7 +483,7 @@ def _minhash_signature(shingles: set[int], n_perm: int = 128) -> tuple[int, ...]
     """Compute a MinHash signature from a set of hashed shingles."""
     if not shingles:
         return tuple([0xFFFFFFFF] * n_perm)
-    coef = _MINHASH_COEF[:n_perm]
+    coef = _minhash_coeffs(n_perm)
     sig = [0xFFFFFFFF] * n_perm
     for x in shingles:
         for i, (a, b) in enumerate(coef):
@@ -490,6 +510,12 @@ def minhash_signature_for_text(
     Returns:
         tuple[int, ...]: Deterministic signature of length n_perm.
     """
+    if n_perm < 0:
+        raise ValueError(f"n_perm must be non-negative; got {n_perm!r}.")
+    if n_perm > _MINHASH_MAX_PERMS:
+        raise ValueError(
+            f"n_perm must be <= {_MINHASH_MAX_PERMS}; got {n_perm!r}."
+        )
     shingles = _shingle_hashes(text, k=k, max_shingles=max_shingles)
     return _minhash_signature(shingles, n_perm=n_perm)
 
@@ -518,6 +544,10 @@ class MinHashLSH:
         """
         if n_perm <= 0:
             raise ValueError(f"n_perm must be positive; got {n_perm!r}.")
+        if n_perm > _MINHASH_MAX_PERMS:
+            raise ValueError(
+                f"n_perm must be <= {_MINHASH_MAX_PERMS}; got {n_perm!r}."
+            )
         if bands <= 0:
             raise ValueError(f"bands must be positive; got {bands!r}.")
         if n_perm % bands != 0:
@@ -604,8 +634,20 @@ class MinHashLSH:
 
 
 # ---------- Syntax checks ----------
-def parse_ok(text: str, lang: str) -> float:
+_DEFAULT_PARSE_MAX_BYTES = 200000
+
+
+def parse_ok(text: str, lang: str, *, max_bytes: int | None = None) -> float:
     """Heuristically validate syntax for supported languages and formats."""
+    if max_bytes is None:
+        max_bytes = _DEFAULT_PARSE_MAX_BYTES
+    if max_bytes is not None and max_bytes <= 0:
+        max_bytes = None
+    if max_bytes is not None:
+        if len(text) > max_bytes:
+            return 0.0
+        if len(text.encode("utf-8", "ignore")) > max_bytes:
+            return 0.0
     lang = (lang or "").strip().lower()
     try:
         if lang == "python":
@@ -800,6 +842,7 @@ class PerplexityModel:
         local_files_only: bool = False,
         max_len: int = 2048,
         stride: int = 1024,
+        strict: bool = False,
     ):
         """Load tokenizer and model if available and set evaluation options.
 
@@ -810,6 +853,7 @@ class PerplexityModel:
             local_files_only (bool): Whether to avoid remote model downloads.
             max_len (int): Maximum context length for sliding-window scoring.
             stride (int): Overlap stride for perplexity computation.
+            strict (bool): When true, re-raise model/tokenizer load failures.
         """
         self.model: Any | None = None
         self.tok: Any | None = None
@@ -817,33 +861,40 @@ class PerplexityModel:
         effective_local_only = local_files_only or allow_downloads not in {"1", "true", "yes"}
         if not _ensure_hf():
             return
-        self.tok = AutoTokenizer.from_pretrained(
-            model_id,
-            use_fast=True,
-            local_files_only=effective_local_only,
-        )
-        dtype_value = (
-            getattr(torch, dtype)
-            if hasattr(torch, dtype)
-            else None
-        )
-        model_kwargs = {"local_files_only": effective_local_only}
-        if dtype_value is not None:
-            model_kwargs["dtype"] = dtype_value
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-        except TypeError:
-            if dtype_value is None or "torch_dtype" in model_kwargs:
+            self.tok = AutoTokenizer.from_pretrained(
+                model_id,
+                use_fast=True,
+                local_files_only=effective_local_only,
+            )
+            dtype_value = (
+                getattr(torch, dtype)
+                if hasattr(torch, dtype)
+                else None
+            )
+            model_kwargs = {"local_files_only": effective_local_only}
+            if dtype_value is not None:
+                model_kwargs["dtype"] = dtype_value
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+            except TypeError:
+                if dtype_value is None or "torch_dtype" in model_kwargs:
+                    raise
+                model_kwargs.pop("dtype", None)
+                model_kwargs["torch_dtype"] = dtype_value
+                self.model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+            dev = device if device in ("cuda", "cpu") else "cpu"
+            model = cast(Any, self.model)
+            model.to(dev)
+            model.eval()
+            self.max_len = max_len
+            self.stride = stride
+        except Exception:
+            if strict:
                 raise
-            model_kwargs.pop("dtype", None)
-            model_kwargs["torch_dtype"] = dtype_value
-            self.model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-        dev = device if device in ("cuda", "cpu") else "cpu"
-        model = cast(Any, self.model)
-        model.to(dev)
-        model.eval()
-        self.max_len = max_len
-        self.stride = stride
+            self.model = None
+            self.tok = None
+            return
 
     def ppl(self, text: str) -> float:
         """Compute perplexity for text, returning inf if unavailable."""

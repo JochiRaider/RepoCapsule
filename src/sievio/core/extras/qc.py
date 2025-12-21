@@ -305,7 +305,10 @@ class JSONLQualityScorer:
         ascii_r = ascii_ratio(text)
         rep = repetition_rate(text, heuristics=self.heuristics)
         comp = code_complexity(text, heuristics=self.heuristics)
-        p_ok = parse_ok(text, lang)
+        parse_max_bytes = None
+        if self.heuristics is not None:
+            parse_max_bytes = getattr(self.heuristics, "parse_max_bytes", None)
+        p_ok = parse_ok(text, lang, max_bytes=parse_max_bytes)
 
         simhash_max_tokens = None
         minhash_max_shingles = None
