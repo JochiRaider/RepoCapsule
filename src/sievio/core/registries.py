@@ -24,6 +24,12 @@ from .interfaces import (
     SourceFactory,
     SourceFactoryContext,
 )
+from .registry_callables import (
+    CallableQualityScorerFactory,
+    CallableSafetyScorerFactory,
+    CallableSinkFactory,
+    CallableSourceFactory,
+)
 from .log import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - type-only deps
@@ -40,6 +46,46 @@ class SourceRegistry:
     def register(self, factory: SourceFactory) -> None:
         """Register a source factory."""
         self._factories[factory.id] = factory
+
+    def register_callable(
+        self,
+        kind: str,
+        fn: Callable[..., Iterable[Any] | None],
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+        name: str | None = None,
+    ) -> None:
+        """Register a callable as a SourceFactory-backed source."""
+        if not replace and kind in self._factories:
+            raise ValueError(f"Source factory {kind!r} is already registered")
+        self._factories[kind] = CallableSourceFactory(
+            id=kind,
+            fn=fn,
+            options_model=options_model,
+            name=name,
+        )
+
+    def source(
+        self,
+        kind: str,
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+        name: str | None = None,
+    ) -> Callable[[Callable[..., Iterable[Any] | None]], Callable[..., Iterable[Any] | None]]:
+        """Decorator to register a callable source for ``kind``."""
+        def decorator(fn: Callable[..., Iterable[Any] | None]) -> Callable[..., Iterable[Any] | None]:
+            self.register_callable(
+                kind,
+                fn,
+                options_model=options_model,
+                replace=replace,
+                name=name,
+            )
+            return fn
+
+        return decorator
 
     def build_all(self, ctx: SourceFactoryContext, specs: Sequence[SourceSpec]) -> list[Source]:
         """Instantiate sources for each spec using the registered factories.
@@ -72,6 +118,46 @@ class SinkRegistry:
     def register(self, factory: SinkFactory) -> None:
         """Register a sink factory."""
         self._factories[factory.id] = factory
+
+    def register_callable(
+        self,
+        kind: str,
+        fn: Callable[..., Any],
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+        name: str | None = None,
+    ) -> None:
+        """Register a callable as a SinkFactory-backed sink."""
+        if not replace and kind in self._factories:
+            raise ValueError(f"Sink factory {kind!r} is already registered")
+        self._factories[kind] = CallableSinkFactory(
+            id=kind,
+            fn=fn,
+            options_model=options_model,
+            name=name,
+        )
+
+    def sink(
+        self,
+        kind: str,
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+        name: str | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator to register a callable sink for ``kind``."""
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            self.register_callable(
+                kind,
+                fn,
+                options_model=options_model,
+                replace=replace,
+                name=name,
+            )
+            return fn
+
+        return decorator
 
     def build_all(
         self,
@@ -167,6 +253,23 @@ class QualityScorerRegistry:
         """Register a quality scorer factory."""
         self._factories[factory.id] = factory
 
+    def register_callable(
+        self,
+        factory_id: str,
+        fn: Callable[..., QualityScorer],
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+    ) -> None:
+        """Register a callable as a quality scorer factory."""
+        if not replace and factory_id in self._factories:
+            raise ValueError(f"Quality scorer factory {factory_id!r} is already registered")
+        self._factories[factory_id] = CallableQualityScorerFactory(
+            id=factory_id,
+            fn=fn,
+            options_model=options_model,
+        )
+
     def get(self, factory_id: str | None = None) -> QualityScorerFactory | None:
         """Return a scorer factory by id or the first registered one."""
         if factory_id is not None:
@@ -220,6 +323,23 @@ class SafetyScorerRegistry:
     def register(self, factory: SafetyScorerFactory) -> None:
         """Register a safety scorer factory."""
         self._factories[factory.id] = factory
+
+    def register_callable(
+        self,
+        factory_id: str,
+        fn: Callable[..., SafetyScorer],
+        *,
+        options_model: type[Any] | None = None,
+        replace: bool = False,
+    ) -> None:
+        """Register a callable as a safety scorer factory."""
+        if not replace and factory_id in self._factories:
+            raise ValueError(f"Safety scorer factory {factory_id!r} is already registered")
+        self._factories[factory_id] = CallableSafetyScorerFactory(
+            id=factory_id,
+            fn=fn,
+            options_model=options_model,
+        )
 
     def get(self, factory_id: str | None = None) -> SafetyScorerFactory | None:
         """Return a scorer factory by id or the first registered one."""

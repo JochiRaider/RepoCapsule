@@ -67,18 +67,27 @@ def load_entrypoint_plugins(
         try:
             try:
                 func(
-                    source_registry,
-                    sink_registry,
-                    bytes_registry,
-                    scorer_registry,
-                    safety_scorer_registry,
+                    source_registry=source_registry,
+                    sink_registry=sink_registry,
+                    bytes_registry=bytes_registry,
+                    scorer_registry=scorer_registry,
+                    safety_scorer_registry=safety_scorer_registry,
                 )
             except TypeError:
-                func(
-                    source_registry,
-                    sink_registry,
-                    bytes_registry,
-                    scorer_registry,
-                )
+                try:
+                    func(
+                        source_registry,
+                        sink_registry,
+                        bytes_registry,
+                        scorer_registry,
+                        safety_scorer_registry,
+                    )
+                except TypeError:
+                    func(
+                        source_registry,
+                        sink_registry,
+                        bytes_registry,
+                        scorer_registry,
+                    )
         except Exception as exc:  # noqa: BLE001
             log.warning("Plugin %s execution failed: %s", ep.name, exc)
