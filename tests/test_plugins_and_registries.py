@@ -76,6 +76,34 @@ def test_load_entrypoint_plugins_logs_failures(monkeypatch, caplog):
     assert any("bad_plugin" in msg for msg in messages)
 
 
+def test_load_entrypoint_plugins_uses_kwargs_first(monkeypatch):
+    called = SimpleNamespace(value=False)
+
+    def kw_plugin(*, source_registry, sink_registry, bytes_registry, scorer_registry, safety_scorer_registry):
+        called.value = True
+
+    eps = [FakeEntryPoint("kw_plugin", value=kw_plugin)]
+
+    class DummyEntryPoints(list):
+        def select(self, group=None):
+            return self if group == "sievio.plugins" else []
+
+    def fake_entry_points():
+        return DummyEntryPoints(eps)
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points)
+
+    load_entrypoint_plugins(
+        source_registry=SourceRegistry(),
+        sink_registry=SinkRegistry(),
+        bytes_registry=BytesHandlerRegistry(),
+        scorer_registry=QualityScorerRegistry(),
+        safety_scorer_registry=SafetyScorerRegistry(),
+    )
+
+    assert called.value is True
+
+
 def test_source_registry_unknown_kind_raises():
     registry = default_source_registry()
     cfg = SievioConfig()

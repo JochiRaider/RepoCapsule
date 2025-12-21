@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from importlib import metadata
+from typing import cast
 
 from .log import get_logger
 from .registries import (
@@ -53,11 +54,12 @@ def load_entrypoint_plugins(
         log.debug("Plugin discovery skipped: %s", exc)
         return
 
-    eps = (
-        entry_points.select(group=group)
-        if hasattr(entry_points, "select")
-        else entry_points.get(group, [])
-    )
+    eps: Sequence[metadata.EntryPoint]
+    if hasattr(entry_points, "select"):
+        eps = cast(Sequence[metadata.EntryPoint], entry_points.select(group=group))
+    else:
+        grouped = cast(Mapping[str, Sequence[metadata.EntryPoint]], entry_points)
+        eps = grouped.get(group, ())
     for ep in eps:
         try:
             func = ep.load()
@@ -67,18 +69,27 @@ def load_entrypoint_plugins(
         try:
             try:
                 func(
-                    source_registry,
-                    sink_registry,
-                    bytes_registry,
-                    scorer_registry,
-                    safety_scorer_registry,
+                    source_registry=source_registry,
+                    sink_registry=sink_registry,
+                    bytes_registry=bytes_registry,
+                    scorer_registry=scorer_registry,
+                    safety_scorer_registry=safety_scorer_registry,
                 )
             except TypeError:
-                func(
-                    source_registry,
-                    sink_registry,
-                    bytes_registry,
-                    scorer_registry,
-                )
+                try:
+                    func(
+                        source_registry,
+                        sink_registry,
+                        bytes_registry,
+                        scorer_registry,
+                        safety_scorer_registry,
+                    )
+                except TypeError:
+                    func(
+                        source_registry,
+                        sink_registry,
+                        bytes_registry,
+                        scorer_registry,
+                    )
         except Exception as exc:  # noqa: BLE001
             log.warning("Plugin %s execution failed: %s", ep.name, exc)

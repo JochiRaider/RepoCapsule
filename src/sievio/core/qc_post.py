@@ -8,7 +8,7 @@ import json
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from typing import Any
+from typing import Any, Literal, cast
 
 from .concurrency import Executor, ExecutorConfig, infer_executor_kind, resolve_qc_executor_config
 from .config import QCConfig, QCMode, SafetyConfig, SievioConfig
@@ -44,7 +44,7 @@ class PostQCHook(RunLifecycleHook):
     def on_run_start(self, ctx: RunContext) -> None:
         return None
 
-    def on_record(self, record: Mapping[str, Any]) -> Mapping[str, Any] | None:  # type: ignore[override]
+    def on_record(self, record: Mapping[str, Any]) -> Mapping[str, Any] | None:
         return record
 
     def on_run_end(self, ctx: RunContext) -> None:
@@ -89,7 +89,7 @@ class PostSafetyHook(RunLifecycleHook):
     def on_run_start(self, ctx: RunContext) -> None:
         return None
 
-    def on_record(self, record: Mapping[str, Any]) -> Mapping[str, Any] | None:  # type: ignore[override]
+    def on_record(self, record: Mapping[str, Any]) -> Mapping[str, Any] | None:
         return record
 
     def on_run_end(self, ctx: RunContext) -> None:
@@ -332,7 +332,6 @@ def run_safety_over_jsonl(
 
     tracker = QCSummaryTracker(enabled=bool(safety_cfg.enabled), mode=safety_cfg.mode)
     policy = SafetyDecisionPolicy()
-    apply_gates = not getattr(safety_cfg, "annotate_only", False)
     should_write_csv = safety_cfg.write_csv if write_csv is None else bool(write_csv)
     should_write_signals = (
         safety_cfg.write_signals_sidecar
@@ -351,11 +350,10 @@ def run_safety_over_jsonl(
     def _consume_rows(rows: Iterable[dict[str, Any]]) -> None:
         for row in rows:
             decision = policy.decide(row, cfg=safety_cfg)
-            did_drop = apply_gates and bool(decision.would_drop)
             tracker.observe_safety(
                 row,
                 decision,
-                did_drop=did_drop,
+                did_drop=False,
                 screener_id="safety",
                 mode=QCMode.POST,
             )
@@ -421,11 +419,10 @@ def run_safety_over_jsonl(
                 )
         for row in rows:
             decision = policy.decide(row, cfg=safety_cfg)
-            did_drop = apply_gates and bool(decision.would_drop)
             tracker.observe_safety(
                 row,
                 decision,
-                did_drop=did_drop,
+                did_drop=False,
                 screener_id="safety",
                 mode=QCMode.POST,
             )
@@ -476,11 +473,16 @@ def _run_post_safety(
         return QCSummaryTracker().as_dict()
     runtime_scorer = getattr(runtime, "post_safety_scorer", None) if runtime is not None else None
     scorer_obj = scorer or runtime_scorer or make_safety_scorer(safety_cfg, new_instance=True)
+    if scorer_obj is None:
+        raise RuntimeError(
+            "Safety scorer unavailable for post-safety; "
+            "configuration should have disabled safety when extras were missing."
+        )
     summary, _rows = run_safety_over_jsonl(
         jsonl_path,
         safety_cfg,
         config=config,
-        scorer=scorer_obj,  # type: ignore[arg-type]
+        scorer=scorer_obj,
         runtime=runtime,
         executor_hint=executor_hint,
         write_csv=safety_cfg.write_csv,
@@ -575,12 +577,13 @@ def collect_qc_rows_from_jsonl(
 
 def emit_qc_csv(rows: Sequence[dict[str, Any]], jsonl_path: str, out_csv: str) -> None:
     """Write QC rows to CSV using available helpers."""
+    _write_csv: Callable[..., Any] | None = None
+    _score_jsonl_to_csv: Callable[..., Any] | None = None
     try:  # pragma: no cover - optional QC extras
         from .extras.qc import score_jsonl_to_csv as _score_jsonl_to_csv
         from .extras.qc import write_csv as _write_csv
     except Exception:  # pragma: no cover - optional QC extras
-        _write_csv = None
-        _score_jsonl_to_csv = None
+        pass
 
     if _write_csv is not None:
         _write_csv(rows, out_csv)
@@ -596,14 +599,15 @@ def _collect_signal_rows(rows: Sequence[dict[str, Any]]) -> tuple[list[str], lis
     raw_signals: list[tuple[Any, dict[str, Any]]] = []
     for row in rows:
         _, signals = filter_qc_meta(row)
-        raw_signals.append((row.get("doc_id"), signals))
-        signal_keys.update(signals.keys())
+        signals_dict = dict(signals)
+        raw_signals.append((row.get("doc_id"), signals_dict))
+        signal_keys.update(signals_dict.keys())
     fieldnames = ["doc_id", *sorted(signal_keys)]
     out_rows: list[dict[str, Any]] = []
-    for doc_id, signals in raw_signals:
-        payload = {key: None for key in fieldnames}
+    for doc_id, signal_row in raw_signals:
+        payload: dict[str, Any] = {key: None for key in fieldnames}
         payload["doc_id"] = doc_id
-        for key, value in signals.items():
+        for key, value in signal_row.items():
             payload[key] = value
         out_rows.append(payload)
     return fieldnames, out_rows
@@ -638,8 +642,8 @@ def emit_qc_signals_parquet(
     if not rows:
         return
     try:
-        import pyarrow as pa  # type: ignore
-        import pyarrow.parquet as pq  # type: ignore
+        import pyarrow as pa
+        import pyarrow.parquet as pq
     except Exception as exc:
         raise RuntimeError(
             "PyArrow is required for Parquet signal sidecars; "
@@ -1112,16 +1116,18 @@ def _resolve_safety_executor_config(
     raw_kind = (
         safety_cfg.post_executor_kind or pc.executor_kind or "thread"
     ).strip().lower()
+    kind: str
     if raw_kind == "auto":
         kind = infer_executor_kind(cfg, runtime=runtime)
     else:
         kind = raw_kind
     if kind not in {"thread", "process"}:
         kind = "thread"
+    kind = cast(Literal["thread", "process"], kind)
     return ExecutorConfig(
         max_workers=max_workers,
         window=max(window, max_workers),
-        kind=kind,  # type: ignore[arg-type]
+        kind=kind,
     )
 
 
@@ -1388,8 +1394,8 @@ def emit_safety_signals_parquet(
     if not rows:
         return
     try:
-        import pyarrow as pa  # type: ignore
-        import pyarrow.parquet as pq  # type: ignore
+        import pyarrow as pa
+        import pyarrow.parquet as pq
     except Exception as exc:
         raise RuntimeError(
             "PyArrow is required for Parquet safety sidecars; "
@@ -1406,10 +1412,10 @@ def _log_post_safety_summary(summary: dict[str, Any]) -> None:
     safety = screeners.get("safety") if isinstance(screeners, Mapping) else {}
     safety_payload = safety if isinstance(safety, Mapping) else {}
     log.info(
-        "Post-safety summary (mode=%s, scored=%s, dropped=%s, errors=%s)",
+        "Post-safety summary (mode=%s, scored=%s, would_drop_records=%s, errors=%s)",
         safety_payload.get("mode") or summary.get("mode"),
         int(safety_payload.get("scored", 0) or 0),
-        int(safety_payload.get("dropped", 0) or 0),
+        int(safety_payload.get("would_drop_records", 0) or 0),
         int(safety_payload.get("errors", 0) or 0),
     )
     flags = safety_payload.get("flags") or {}

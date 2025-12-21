@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from .config import QCConfig, QCMode, SafetyConfig
 from .interfaces import (
@@ -39,6 +39,37 @@ class ScreenDecision:
     candidates: tuple[str, ...] = ()
     # Reasons that would trigger a drop if gates are applied.
     would_drop: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GatePolicy:
+    """Normalized gating policy for screeners."""
+
+    enforce_drops: bool
+    mode: str
+
+
+def _normalize_mode(value: str | None, *, default: str = QCMode.INLINE) -> str:
+    try:
+        return QCMode.normalize(value)
+    except Exception:
+        return default
+
+
+def gate_policy_for_quality(cfg: QCConfig | None) -> GatePolicy:
+    if cfg is None:
+        return GatePolicy(False, QCMode.OFF)
+    mode = _normalize_mode(cfg.mode)
+    enforce = bool(cfg.enabled and mode == QCMode.INLINE)
+    return GatePolicy(enforce_drops=enforce, mode=mode)
+
+
+def gate_policy_for_safety(cfg: SafetyConfig | None) -> GatePolicy:
+    if cfg is None:
+        return GatePolicy(False, QCMode.OFF)
+    mode = _normalize_mode(cfg.mode)
+    enforce = bool(cfg.enabled and mode == QCMode.INLINE and not cfg.annotate_only)
+    return GatePolicy(enforce_drops=enforce, mode=mode)
 
 
 @dataclass(slots=True)
@@ -202,6 +233,7 @@ class ScreenerStats:
     """Per-screener summary used by QCSummaryTracker.
 
     drops counts track would-drop reasons (independent of whether gates were applied).
+    would_drop_records tracks the number of records that triggered any would-drop reason.
     """
 
     id: str
@@ -210,6 +242,7 @@ class ScreenerStats:
     scored: int = 0
     kept: int = 0
     dropped: int = 0
+    would_drop_records: int = 0
     errors: int = 0
     signal_stats: dict[str, ScalarSignalStats] = field(default_factory=dict)
     flags: dict[str, int] = field(default_factory=dict)
@@ -224,6 +257,7 @@ class ScreenerStats:
             "scored": int(self.scored),
             "kept": int(self.kept),
             "dropped": int(self.dropped),
+            "would_drop_records": int(self.would_drop_records),
             "errors": int(self.errors),
             "signal_stats": {k: s.as_dict() for k, s in self.signal_stats.items()},
             "flags": dict(self.flags),
@@ -248,6 +282,11 @@ class ScreenerStats:
         stats.scored = _coerce_int(data.get("scored"), strict=strict)
         stats.kept = _coerce_int(data.get("kept"), strict=strict)
         stats.dropped = _coerce_int(data.get("dropped"), strict=strict)
+        stats.would_drop_records = _coerce_int(
+            data.get("would_drop_records"),
+            default=0,
+            strict=strict,
+        )
         stats.errors = _coerce_int(data.get("errors"), strict=strict)
         signals = data.get("signal_stats")
         if isinstance(signals, Mapping):
@@ -287,6 +326,7 @@ class ScreenerStats:
         stats.scored = self.scored
         stats.kept = self.kept
         stats.dropped = self.dropped
+        stats.would_drop_records = self.would_drop_records
         stats.errors = self.errors
         stats.signal_stats = {k: v.clone() for k, v in self.signal_stats.items()}
         stats.flags = dict(self.flags)
@@ -301,6 +341,7 @@ class ScreenerStats:
         self.scored += other.scored
         self.kept += other.kept
         self.dropped += other.dropped
+        self.would_drop_records += other.would_drop_records
         self.errors += other.errors
         for name, stats in other.signal_stats.items():
             existing = self.signal_stats.get(name)
@@ -416,6 +457,7 @@ class QCSummaryTracker:
             screener_id,
             mode=self.mode if screener_id == "quality" else None,
         )
+        assert screener is not None
         screener.enabled = True
         screener.scored += 1
         family_id = qc_result.get("dup_family_id") or qc_result.get("doc_id")
@@ -429,6 +471,8 @@ class QCSummaryTracker:
             self._increment_candidate(screener, reason)
         for reason in decision.would_drop:
             self._increment_drop(screener, reason)
+        if decision.would_drop:
+            screener.would_drop_records += 1
 
         if did_drop:
             screener.dropped += 1
@@ -591,6 +635,8 @@ class QCSummaryTracker:
             self._increment_candidate(stats, reason)
         for reason in decision.would_drop:
             self._increment_drop(stats, reason)
+        if decision.would_drop:
+            stats.would_drop_records += 1
 
         if did_drop:
             stats.dropped += 1
@@ -728,6 +774,10 @@ class InlineScreeningController:
         self._qc_cfg = value
 
     @property
+    def safety_cfg(self) -> SafetyConfig | None:
+        return self._safety_cfg
+
+    @property
     def tracker(self) -> QCSummaryTracker:
         return self.summary
 
@@ -777,15 +827,11 @@ class InlineScreeningController:
         )
 
         if effective_qc is not None:
-            self.apply_qc_gates = effective_qc.enabled and effective_qc.mode == QCMode.INLINE
+            self.apply_qc_gates = gate_policy_for_quality(effective_qc).enforce_drops
         else:
             self.apply_qc_gates = None
         if effective_safety is not None:
-            self.apply_safety_gates = (
-                effective_safety.enabled
-                and effective_safety.mode == QCMode.INLINE
-                and not effective_safety.annotate_only
-            )
+            self.apply_safety_gates = gate_policy_for_safety(effective_safety).enforce_drops
         else:
             self.apply_safety_gates = None
 
@@ -841,14 +887,14 @@ class InlineScreeningController:
         if enforce is None:
             return
         try:
-            screener.enforce_drops = enforce
+            cast(Any, screener).enforce_drops = enforce
         except Exception:
             return
 
     def _sync_screeners(self) -> None:
         for screener in self.screeners:
             try:
-                screener.summary = self.summary
+                cast(Any, screener).summary = self.summary
             except Exception:
                 continue
 
@@ -904,6 +950,8 @@ class QualityInlineScreener:
 
         if not isinstance(record, dict):
             return record
+        if not isinstance(record, dict):
+            return record
         meta = ensure_meta_dict(record)
         tokens_est = qc_result.get("tokens")
         if tokens_est is not None:
@@ -941,13 +989,13 @@ class SafetyInlineScreener:
     summary: QCSummaryTracker = field(default_factory=QCSummaryTracker)
     decision_policy: SafetyDecisionPolicy = field(default_factory=SafetyDecisionPolicy)
     logger: Any | None = None
-    enforce_drops: bool = True  # whether safety is gating or annotate-only
+    enforce_drops: bool = True  # gating policy already respects annotate_only
 
     def process_record(self, record: Record) -> Record | None:
         if not (self.cfg.enabled and self.scorer):
             return record
 
-        apply_gates = self.enforce_drops and not self.cfg.annotate_only
+        apply_gates = self.enforce_drops
 
         try:
             result = self.scorer.score_record(record)
@@ -972,6 +1020,8 @@ class SafetyInlineScreener:
         if did_drop:
             return None
 
+        if not isinstance(record, dict):
+            return record
         meta = ensure_meta_dict(record)
         _, safety_meta = filter_safety_meta(result)
         extra = meta.get("extra")
@@ -1011,12 +1061,13 @@ class InlineQCController:
             and scorer is not None
             and config.mode in {QCMode.INLINE, QCMode.ADVISORY}
         ):
+            gate_policy = gate_policy_for_quality(config)
             qc_screener = QualityInlineScreener(
                 cfg=config,
                 scorer=scorer,
                 summary=summary,
                 logger=logger,
-                enforce_drops=(config.mode == QCMode.INLINE),
+                enforce_drops=gate_policy.enforce_drops,
             )
             screeners.append(qc_screener)
 
@@ -1026,12 +1077,13 @@ class InlineQCController:
             and safety_scorer is not None
             and safety_cfg.mode in {QCMode.INLINE, QCMode.ADVISORY}
         ):
+            gate_policy = gate_policy_for_safety(safety_cfg)
             safety_screener = SafetyInlineScreener(
                 cfg=safety_cfg,
                 scorer=safety_scorer,
                 summary=summary,
                 logger=logger,
-                enforce_drops=(safety_cfg.mode == QCMode.INLINE),
+                enforce_drops=gate_policy.enforce_drops,
             )
             screeners.append(safety_screener)
 
@@ -1103,6 +1155,7 @@ class InlineQCHook(RunLifecycleHook):
         safety_scorer: SafetyScorer | None = None,
         controller: InlineScreeningController | None = None,
     ) -> None:
+        self._controller: InlineScreeningController | InlineQCController
         self._qc_cfg = qc_cfg
         self._safety_cfg = safety_cfg
         self._scorer = scorer
@@ -1180,7 +1233,7 @@ class InlineQCHook(RunLifecycleHook):
 
         rows = collect_qc_rows_from_jsonl(
             str(jsonl_path),
-            qc_cfg=self._controller.cfg,
+            qc_cfg=cfg,
             config=ctx.cfg,
             scorer=scorer,
             runtime=getattr(ctx, "runtime", None),
@@ -1194,7 +1247,9 @@ class InlineQCHook(RunLifecycleHook):
         if err_count and hasattr(ctx, "stats"):
             try:
                 target_stats = getattr(ctx.stats, "qc", None)
-                target_quality = target_stats.get_screener("quality") if target_stats else None  # type: ignore[attr-defined]
+                target_quality = None
+                if isinstance(target_stats, QCSummaryTracker):
+                    target_quality = target_stats.get_screener("quality")
                 if target_quality is not None:
                     target_quality.errors += err_count
             except Exception:
