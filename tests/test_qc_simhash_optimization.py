@@ -23,6 +23,15 @@ def test_simhash_index_basic():
     assert doc_id is None
 
 
+def test_simhash_threshold_inclusive():
+    idx = SimHashWindowIndex(window_size=5, hamming_thresh=4)
+    idx.add(0, "doc")
+    h_thresh = 0b1111
+    dist, doc_id = idx.query(h_thresh)
+    assert dist == 4
+    assert doc_id == "doc"
+
+
 def test_simhash_window_eviction():
     idx = SimHashWindowIndex(window_size=2, hamming_thresh=4)
 

@@ -16,6 +16,7 @@ import math
 import os
 import random
 import re
+import threading
 import zlib
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -127,9 +128,13 @@ def open_jsonl_output_maybe_gz(path: str | os.PathLike[str], mode: str = "a") ->
         TextIO: Text stream opened with UTF-8 encoding.
     """
     p = Path(path)
+    mode_base = mode.replace("t", "")
+    if "b" in mode_base or mode_base not in {"a", "w", "x"}:
+        raise ValueError(f"mode must be text 'a', 'w', or 'x'; got {mode!r}.")
+    normalized_mode = f"{mode_base}t"
     if p.suffix.lower() == ".gz":
-        return cast(TextIO, gzip.open(p, f"{mode}t", encoding="utf-8"))
-    return cast(TextIO, open(p, mode, encoding="utf-8"))
+        return cast(TextIO, gzip.open(p, normalized_mode, encoding="utf-8"))
+    return cast(TextIO, open(p, normalized_mode, encoding="utf-8"))
 
 
 def target_band(lang: str, *, heuristics: QCHeuristics | None = None) -> tuple[int, int]:
@@ -194,7 +199,7 @@ def repetition_rate(
         heuristics (QCHeuristics | None): Optional provider of defaults.
 
     Returns:
-        float: Portion of characters covered by repeat grams.
+        float: Portion of k-gram positions that are repeats.
     """
     if k is None and heuristics is not None:
         k = heuristics.repetition_k
@@ -219,7 +224,7 @@ def repetition_rate(
         seen[gram] = seen.get(gram, 0) + 1
         if seen[gram] > 1:
             reps += 1
-    return reps / max(1, len(s) - k)
+    return reps / max(1, len(s) - k + 1)
 
 
 def code_complexity(s: str, *, heuristics: QCHeuristics | None = None) -> float:
@@ -362,7 +367,10 @@ def hamming(a: int, b: int) -> int:
 
 
 class SimHashWindowIndex:
-    """Sliding-window LSH index for SimHash using 4 x 16-bit bands."""
+    """Sliding-window LSH index for SimHash using 4 x 16-bit bands.
+
+    Matches are returned when the Hamming distance is <= hamming_thresh.
+    """
 
     __slots__ = ("window_size", "thresh", "queue", "tables")
 
@@ -419,7 +427,7 @@ class SimHashWindowIndex:
             if best_dist is None or dist < best_dist:
                 best_dist = dist
                 best_id = cand_id
-        if best_dist is not None and best_dist < self.thresh:
+        if best_dist is not None and best_dist <= self.thresh:
             return best_dist, best_id
         return None, None
 
@@ -435,6 +443,7 @@ _MINHASH_SEED = 0x5EED5EED
 _MINHASH_MAX_PERMS = 8192
 _MINHASH_RNG = random.Random(_MINHASH_SEED)
 _MINHASH_COEFS: list[tuple[int, int]] = []
+_MINHASH_LOCK = threading.Lock()
 
 
 def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
@@ -448,10 +457,13 @@ def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
     if n_perm == 0:
         return []
     if len(_MINHASH_COEFS) < n_perm:
-        for _ in range(len(_MINHASH_COEFS), n_perm):
-            a = _MINHASH_RNG.randrange(1, _PRIME32 - 1)
-            b = _MINHASH_RNG.randrange(0, _PRIME32 - 1)
-            _MINHASH_COEFS.append((a, b))
+        # Guard RNG/cache mutation so concurrent callers can't interleave coefficients.
+        with _MINHASH_LOCK:
+            if len(_MINHASH_COEFS) < n_perm:
+                for _ in range(len(_MINHASH_COEFS), n_perm):
+                    a = _MINHASH_RNG.randrange(1, _PRIME32 - 1)
+                    b = _MINHASH_RNG.randrange(0, _PRIME32 - 1)
+                    _MINHASH_COEFS.append((a, b))
     return _MINHASH_COEFS[:n_perm]
 
 
@@ -922,7 +934,10 @@ class PerplexityModel:
                 out = self.model(slice_ids, labels=target)
                 loss_val = float(out.loss.detach())
             nll += loss_val * trg
-        return math.exp(nll / max(1, denom))
+        try:
+            return math.exp(nll / max(1, denom))
+        except OverflowError:
+            return float("inf")
 
 
 def _ensure_hf() -> bool:
