@@ -25,6 +25,7 @@ from .convert import (
     make_limited_stream,
     maybe_reopenable_local_path,
 )
+from .factories_qc import make_qc_scorer, make_safety_scorer
 from .interfaces import (
     FileExtractor,
     FileMiddleware,
@@ -38,7 +39,6 @@ from .interfaces import (
     Source,
 )
 from .log import get_logger
-from .factories_qc import make_qc_scorer, make_safety_scorer
 from .qc_controller import InlineQCController, InlineQCHook, QCSummaryTracker
 from .records import best_effort_record_path
 
@@ -765,8 +765,8 @@ class PipelineEngine:
         executor_kind: str,
     ) -> _InlineQCWorkerSpec:
         qc_cfg = self.config.qc
-        safety_cfg = getattr(qc_cfg, "safety", None)
-        worker_safety = replace(safety_cfg, scorer=None) if safety_cfg is not None else None
+        safety_cfg = qc_cfg.safety
+        worker_safety = replace(safety_cfg, scorer=None)
         worker_qc = replace(qc_cfg, scorer=None, safety=worker_safety)
         scorer = qc_cfg.scorer if executor_kind == "thread" else None
         safety_scorer = safety_cfg.scorer if executor_kind == "thread" else None
@@ -780,14 +780,13 @@ class PipelineEngine:
 
     def _can_use_parallel_inline_qc(self, *, executor_kind: str, max_workers: int) -> bool:
         qc_cfg = self.config.qc
-        safety_cfg = getattr(qc_cfg, "safety", None)
+        safety_cfg = qc_cfg.safety
         inline_qc = qc_cfg.enabled and qc_cfg.mode in {QCMode.INLINE, QCMode.ADVISORY}
         inline_safety = (
-            bool(safety_cfg)
-            and safety_cfg.enabled
+            safety_cfg.enabled
             and safety_cfg.mode in {QCMode.INLINE, QCMode.ADVISORY}
         )
-        if not getattr(qc_cfg, "parallel_inline", False):
+        if not qc_cfg.parallel_inline:
             return False
         if not (inline_qc or inline_safety):
             return False
@@ -812,7 +811,7 @@ class PipelineEngine:
             )
             return False
         if executor_kind == "thread":
-            scorer = getattr(qc_cfg, "scorer", None)
+            scorer = qc_cfg.scorer
             if scorer is not None and not callable(getattr(scorer, "clone_for_parallel", None)):
                 self.log.warning(
                     "QC parallel_inline requested but quality scorer lacks clone_for_parallel; "
@@ -820,7 +819,7 @@ class PipelineEngine:
                 )
                 return False
             if inline_safety:
-                safety_scorer = getattr(safety_cfg, "scorer", None) if safety_cfg else None
+                safety_scorer = safety_cfg.scorer
                 if safety_scorer is not None and not callable(
                     getattr(safety_scorer, "clone_for_parallel", None)
                 ):

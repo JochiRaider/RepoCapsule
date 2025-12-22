@@ -37,12 +37,15 @@ Run these before proposing changes:
 
 ```bash
 # Run tests
+source .venv/bin/activate
 PYTHONPATH=src pytest
 
 # Lint & style
+source .venv/bin/activate
 ruff check .
 
 # Type-check
+source .venv/bin/activate
 mypy --config-file pyproject.toml src
 ```
 

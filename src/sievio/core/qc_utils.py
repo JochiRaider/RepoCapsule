@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import random
 import json
 import math
 import os
+import random
 import re
 import zlib
 from collections import defaultdict, deque
@@ -861,6 +861,8 @@ class PerplexityModel:
         effective_local_only = local_files_only or allow_downloads not in {"1", "true", "yes"}
         if not _ensure_hf():
             return
+        if AutoTokenizer is None or AutoModelForCausalLM is None or torch is None:
+            return
         try:
             self.tok = AutoTokenizer.from_pretrained(
                 model_id,
@@ -929,7 +931,7 @@ def _ensure_hf() -> bool:
     if _HF_OK:
         return True
     try:
-        import torch as _torch  # type: ignore[import-untyped]
+        import torch as _torch
         from transformers import AutoModelForCausalLM as _AutoModelForCausalLM
         from transformers import AutoTokenizer as _AutoTokenizer
 
