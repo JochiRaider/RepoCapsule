@@ -51,6 +51,7 @@ Key capabilities:
   - `qc`: QC/scoring dependencies (torch/transformers)
   - `evtx`: Windows Event Log support (`python-evtx`)
   - `langid`: language ID backends (`lingua-language-detector`, `pygments`)
+  - `accel`: optional Rust acceleration (`sievio-accel`)
 
 ## Getting started
 
@@ -66,7 +67,7 @@ pip install .
 # For development (editable mode)
 pip install -e .
 # Optional extras (install only what you need):
-pip install -e ".[tok,pdf,parquet,qc,evtx,langid]"
+pip install -e ".[tok,pdf,parquet,qc,evtx,langid,accel]"
 ```
 
 ## Documentation

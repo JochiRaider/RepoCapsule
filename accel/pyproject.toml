@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.10.2"]
+build-backend = "maturin"
+
+[project]
+name = "sievio-accel"
+version = "0.1.0"
+description = "Optional Rust acceleration for Sievio QC hot paths."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Sievio Maintainers" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "sievio_accel._native"
+python-source = "python"
+features = ["pyo3/extension-module"]

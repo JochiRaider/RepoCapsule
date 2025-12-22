@@ -23,6 +23,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, cast
 
+from .accel import accel_required, load_accel
+
 if TYPE_CHECKING:  # pragma: no cover
     from .config import QCHeuristics
 
@@ -74,6 +76,10 @@ _HF_OK = False
 torch: Any | None = None
 AutoModelForCausalLM: Any | None = None
 AutoTokenizer: Any | None = None
+
+
+def _qc_accel() -> Any | None:
+    return load_accel("qc")
 
 
 # ---------- Language groupings & tunables ----------
@@ -343,11 +349,18 @@ def _feature_hash(token: str) -> int:
 
 def simhash64(text: str, *, max_tokens: int | None = None) -> int:
     """Compute a 64-bit Simhash fingerprint for the given text."""
-    v = [0] * 64
     if max_tokens is None:
         max_tokens = _DEFAULT_SIMHASH_MAX_TOKENS
     if max_tokens is not None and max_tokens <= 0:
         return 0
+    accel = _qc_accel()
+    if accel is not None:
+        try:
+            return int(accel.simhash64(text, max_tokens=max_tokens))
+        except Exception:
+            if accel_required():
+                raise
+    v = [0] * 64
     for idx, tok in enumerate(_tokenize_for_simhash(text)):
         if max_tokens is not None and idx >= max_tokens:
             break
@@ -528,6 +541,28 @@ def minhash_signature_for_text(
         raise ValueError(
             f"n_perm must be <= {_MINHASH_MAX_PERMS}; got {n_perm!r}."
         )
+    use_accel = max_shingles is None or max_shingles > 0
+    accel = _qc_accel() if use_accel or accel_required() else None
+    if accel is not None and use_accel:
+        try:
+            if hasattr(accel, "minhash_signature_with_coeffs"):
+                coeffs = _minhash_coeffs(n_perm)
+                return accel.minhash_signature_with_coeffs(
+                    text,
+                    k=k,
+                    n_perm=n_perm,
+                    max_shingles=max_shingles,
+                    coeffs=coeffs,
+                )
+            return accel.minhash_signature_for_text(
+                text,
+                k=k,
+                n_perm=n_perm,
+                max_shingles=max_shingles,
+            )
+        except Exception:
+            if accel_required():
+                raise
     shingles = _shingle_hashes(text, k=k, max_shingles=max_shingles)
     return _minhash_signature(shingles, n_perm=n_perm)
 

@@ -1,6 +1,6 @@
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import random
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest

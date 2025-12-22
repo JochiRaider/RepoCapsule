@@ -1,0 +1,13 @@
+[package]
+name = "sievio_accel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "sievio_accel"
+crate-type = ["cdylib"]
+
+[dependencies]
+blake2 = "0.10"
+pyo3 = { version = "0.23", features = ["extension-module"] }
