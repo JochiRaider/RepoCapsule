@@ -25,6 +25,7 @@ classifiers = [
   "Operating System :: OS Independent",
 ]
 
+# No mandatory runtime deps; keep core install lightweight.
 dependencies = []
 
 [project.optional-dependencies]
@@ -36,6 +37,12 @@ dev = [
   "build>=1.2",
   "twine>=5.1",
 ]
+
+# Rust add-on toolchain (build-time tooling for PyO3/maturin workflows).
+rust = [
+  "maturin>=1.10.2",
+]
+
 tok = ["tiktoken>=0.6"]
 pdf = ["pypdf>=4"]
 evtx = ["python-evtx>=0.8"]
@@ -95,7 +102,7 @@ ignore_missing_imports = true
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.1",
-    "pytest>=9.0.2",
-    "ruff>=0.14.10",
+  "mypy>=1.19.1",
+  "pytest>=9.0.2",
+  "ruff>=0.14.10",
 ]
