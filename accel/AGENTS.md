@@ -1,99 +1,251 @@
-# AGENTS.md – accel/ guidance (native acceleration package)
+# AGENTS.md (accel/) - guidance for native acceleration work (Rust + PyO3)
 
-This directory contains the optional Rust acceleration add-on for Sievio (PyO3/maturin).
-It **inherits** the repository-root `AGENTS.md` rules; follow those first. This file adds
-stricter constraints for native code, ABI stability, determinism, and “optional install”
-behavior.
+This directory contains the optional Rust acceleration add-on for Sievio (PyO3 + maturin).
+It inherits the repository-root `AGENTS.md` rules; follow those first.
+
+This file defines the accel operational ruleset and safety contract for changes in `accel/`.
+If `accel/LLMS.md` exists, treat it as the architecture map; this file defines implementation
+constraints, review requirements, and definition-of-done.
+
+---
+
+## 0) Primary objective
+
+Accelerate CPU-heavy hot paths while preserving Python-visible behavior and keeping the
+acceleration layer optional. Expose a small, stable Python API via PyO3 and use Rust-side
+parallelism only when it produces real wall-clock wins without breaking determinism, safety,
+or observability.
+
+---
 
 ## 1) Scope
 
-- Implement **hot-path, pure(ish)** accelerators (CPU-heavy, allocation-heavy helpers), starting with QC utilities (e.g., hashing, shingling, token-ish heuristics).
-- Preserve **observable Python semantics** (inputs/outputs, edge-case behavior, determinism) unless the task explicitly scopes a behavior change.
-- Keep **I/O, network access, and pipeline orchestration** in Python. The Rust layer should not own sinks/sources, filesystem walking, HTTP, config loading, or record routing.
+Do:
+- Implement hot-path, pure(ish) accelerators (CPU-heavy, allocation-heavy helpers), starting
+  with QC utilities (hashing, shingling, token-ish heuristics, similarity signatures).
+- Preserve observable Python semantics (inputs, outputs, edge cases, determinism) unless the
+  task explicitly scopes a behavior change and adds tests for it.
+- Keep I/O, network access, and pipeline orchestration in Python. The Rust layer must not own
+  sinks/sources, filesystem walking, HTTP, config loading, or record routing.
+
+Do not:
+- Reimplement pipeline control flow, retries, batching policy, logging policy, or registry wiring.
+- Introduce new required runtime dependencies for core `sievio`.
+- Add behavior that changes results depending on thread count, platform, CPU features, or locale.
+
+---
 
 ## 2) Package & boundary goals (maximum decoupling)
 
-- The add-on must be **optional**:
-  - Core `sievio` must run with no Rust toolchain and no compiled wheels installed.
-  - Import failures must **gracefully fall back** to the pure-Python implementation.
-- The Rust package should expose a **small, stable Python-facing API**. Prefer a limited set of functions that mirror the Python helpers rather than exposing internal Rust types.
-- Keep the public surface **domain-oriented** (e.g., `sievio_accel.qc_utils`) so additional accelerators can be added later without changing the import pattern.
+Optional install contract:
+- Core `sievio` must run with no Rust toolchain and no compiled wheels installed.
+- Import failures must gracefully fall back to the pure-Python implementation.
+
+Public API contract:
+- Expose a small, stable Python-facing API. Prefer functions mirroring existing Python helpers
+  rather than exporting Rust types.
+- Keep the public surface domain-oriented (e.g. `sievio_accel.qc_utils`) so new accelerators can
+  be added later without changing the import pattern.
+
+Compatibility posture:
+- Treat Python behavior as the reference implementation. Rust must match it.
+- Prefer abi3 wheels when feasible, but never sacrifice correctness for ABI stability.
+
+---
 
 ## 3) Layout guidance (one distribution, one extension module)
 
-Preferred approach: **one accelerator distribution** (e.g., `sievio-accel` / import `sievio_accel`) that ships **one compiled extension module**, with multiple “domains” exposed as Python submodules.
-
-Why:
-- Reduces wheel/build matrix complexity and CI time.
-- Makes optional install UX simple (`pip install sievio-accel`).
-- Avoids multiplying ABI/packaging surfaces per domain.
+Preferred approach:
+- One accelerator distribution (e.g., `sievio-accel`) that ships one compiled extension module
+  (`sievio_accel._native`), with multiple "domains" exposed as Python submodules.
 
 Implementation shape:
-- One `cdylib` extension (e.g., `sievio_accel._native`).
-- Thin Python wrappers per domain:
-  - `sievio_accel/qc_utils.py` re-exports `sievio_accel._native.qc_*` functions (or similar).
-  - Future domains follow the same pattern (`sievio_accel/chunk.py`, `sievio_accel/decode.py`, etc.).
+- `sievio_accel/qc_utils.py` re-exports `sievio_accel._native.qc_*` functions.
+- Do not create separate compiled modules per domain unless strictly necessary.
 
-Do **not** create a separate compiled module per Sievio module unless you have a concrete, measured reason (e.g., mutually exclusive heavy dependencies, unusually large compile times, or platform constraints that justify splitting).
+---
 
 ## 4) Import shim pattern (core stays authoritative)
 
-In core Python modules (e.g., `src/sievio/core/qc_utils.py`), prefer:
-
-- Try to import accelerated functions behind a single local indirection layer.
+In core Python modules (e.g., `src/sievio/core/qc_utils.py`):
+- Import accelerated functions behind a single local indirection layer.
 - Otherwise use the existing Python implementation.
+- Do not scatter `try/except ImportError` throughout the file.
 
-Guidelines:
-- Do not scatter `try/except ImportError` around the file; centralize it near the top or in a small helper module.
-- Keep the **Python implementation as the reference** for correctness; Rust must match it.
+---
 
-Optional control knobs (if needed):
-- An environment variable to force disable acceleration for debugging (e.g., `SIEVIO_ACCEL=0`).
-- A version/feature probe function in `sievio_accel` (e.g., `sievio_accel.features()`).
+## 5) Rust/PyO3 engineering rules (FFI safety and stability)
 
-## 5) Rust/PyO3 engineering rules
+FFI safety:
+- Do not intentionally panic from Rust called by Python.
+- Return `PyResult<T>` and convert Rust errors into Python exceptions (`PyErr`) while attached.
 
-- **No panics across the FFI boundary.** Convert errors into Python exceptions (`PyErr`) and return `PyResult`.
-- Keep signatures **simple and copy-stable**:
-  - Prefer `&str`, `PyBytes`, `Vec<u32>`, `u64`, `usize`, `f64`, and tuples/lists of primitives.
-  - Avoid accepting arbitrary Python objects unless absolutely necessary.
-- Release the GIL for CPU-bound loops where safe (`Python::allow_threads`), but do not call back into Python while the GIL is released.
-- Determinism:
-  - Avoid global RNG usage unless the Python side is also deterministic and seed-controlled.
-  - Ensure hashing/signature algorithms are stable across runs and platforms (explicit endianness, explicit truncation rules).
-- Unsafe code policy:
-  - Avoid `unsafe` unless it is demonstrably necessary and isolated, with comments explaining invariants and tests that exercise them.
+Modern PyO3 API posture:
+- Prefer the Bound API (`Bound<'py, T>`) for object interaction while attached.
+- Avoid deprecated primitives; prefer current PyO3 synchronization/caching primitives when needed.
 
-## 6) Build & test workflow (discover-first, then run)
+Signature discipline:
+- Prefer primitives (`&str`, `&[u8]`, `u64`, `f64`) over complex Python objects.
+- If you must accept Python objects, accept `&Bound<'_, PyAny>` and convert immediately to Rust-owned data.
 
-Do not guess commands if the repo provides them; **read the root docs** and any local README/CI instructions first.
+Memory policy:
+- Avoid surprising allocations.
+- Never return views into Rust-owned memory that can dangle after the call.
 
-Typical local loop (adjust to the repo’s actual layout):
-- From repo root:
-  - Create/activate the project venv (this repo uses a venv-based workflow).
-  - Install dev deps (and rust tooling if it is modeled as an extra).
-  - Run the baseline Python tests **without** the accel package installed.
-- From this accel directory:
-  - `maturin develop` (debug) or `maturin develop --release` (perf validation).
-  - `cargo test` for Rust-unit coverage (if present).
-- Back at repo root:
-  - Re-run the same Python tests **with** the accel module importable.
-  - If parity tests exist, run them explicitly (or add them if missing).
+Unsafe policy:
+- Avoid `unsafe` unless demonstrably necessary.
+- Document invariants and fuzz-test any `unsafe` blocks.
 
-## 7) Review guidelines (P0 / P1)
+---
 
-P0 (explicit scope required; tests must cover):
-- Any change to Python-visible behavior (return values, error behavior, thresholds, determinism).
-- The import shim / fallback behavior.
-- Build system changes (maturin/pyproject/Cargo features) that affect installability.
+## 6) Attach/Detach parallelism contract (the central rule set)
 
-P1 (risk notes + targeted tests expected):
-- Performance-only refactors (hot loops) that could regress edge cases.
-- New accelerated domains or expanding the accel API surface.
+PyO3 terminology note:
+- In newer PyO3, `Python::attach` / `Python::detach` are the primary names. Older versions used
+  `Python::with_gil` / `Python::allow_threads`. Use the pinned version in code, but keep this
+  policy described in attach/detach terms.
 
-## 8) What “done” means for an accelerator PR
+The goal:
+- Convert Python inputs to Rust-owned data while attached.
+- Detach thread state for CPU-bound Rust compute.
+- Re-attach to wrap results and raise exceptions.
 
-- Core still passes tests with **no** accel installed.
-- Core passes the same tests with accel installed, and the accelerated code path is exercised.
-- Parity is demonstrated for representative inputs (including empty/short strings, large inputs, unicode-heavy text, and pathological cases).
-- Packaging remains optional and does not introduce mandatory runtime dependencies for core.
+Core rules:
+1) Separate conversion from compute:
+   - Phase A (attached): validate inputs, extract bytes/primitives, allocate Rust-owned data.
+   - Phase B (detached): compute using Rust-only data. No Python objects, no Python calls.
+   - Phase C (attached): wrap results into Python objects and raise exceptions if needed.
+
+2) While detached:
+   - Do not touch Python objects (including `PyAny`, `PyList`, `Bound<'py, T>`, or `Py<T>`).
+   - Do not create or raise `PyErr`.
+   - Capture only Rust-owned values (`Vec<u8>`, `String`, domain structs) and translate errors on re-attach.
+
+3) Sequential scalar vs parallel batch:
+   - Scalar APIs default to sequential.
+   - Batch APIs may use Rayon when enabled by the thread budget and when overhead is amortized.
+   - Default to 1 thread: batch APIs remain sequential unless `SIEVIO_ACCEL_THREADS > 1`.
+
+4) Unified control (one knob wins):
+   - Primary knob: `SIEVIO_ACCEL_THREADS` (default 1).
+   - Honor `RAYON_NUM_THREADS` only as a fallback when `SIEVIO_ACCEL_THREADS` is not set.
+   - Reading the thread budget at initialization implies changes require a process restart.
+
+5) Avoid nested parallelism traps:
+   - If the Python pipeline is already parallel (`max_workers > 1`), Rust internal parallelism defaults
+     to 1 unless explicitly justified and measured for a single-kernel win.
+
+6) Verify correctness under different thread counts:
+   - Parity tests must pass with `SIEVIO_ACCEL_THREADS=1` and `SIEVIO_ACCEL_THREADS=4`.
+
+---
+
+## 7) Build & test workflow (venv-first)
+
+Note: `maturin` lives in the project venv.
+
+1) Activate the repo venv (`source .venv/bin/activate`).
+2) Build/install into the venv: `python -m maturin develop`
+3) From the repo root, run the repo-root test command (canonical; keep in sync with `../AGENTS.md`).
+   - Current repo-root command: `pytest`
+4) Run Rust tests inside `accel/`: `cargo test`
+
+---
+
+## 8) Testing standards (parity and edge cases)
+
+Parity testing is mandatory:
+- Inputs: empty strings, Unicode (emojis / normalization), large inputs, pathological repetition.
+- Behavior: match Python reference semantics exactly (including "soft caps").
+- Determinism: identical results across runs and thread counts.
+
+## Testing (accel)
+
+Assumptions:
+- You are using the project venv (maturin is installed in the venv).
+- Tests are run from the repo root and expect the package import path to match the repo-root workflow.
+
+Steps:
+1) From the repo root, ensure Sievio is importable in this venv (use the repo-root documented command).
+   - If the repo-root uses editable install, run that exact command (e.g., `python -m pip install -e ...`).
+
+2) Build/install the accel extension into the SAME venv:
+   - `python -m maturin develop`
+   (Use repo-specific flags/paths if needed.)
+
+3) From the repo root, run the repo-root test command verbatim:
+   - `pytest`
+---
+
+## 9) Performance validation
+
+PRs claiming speedups must include a benchmark measuring:
+1) Python reference.
+2) Rust accel (sequential).
+3) Rust accel (parallel, if applicable), including thread settings used.
+
+---
+
+## 10) Packaging & distribution invariants
+
+- Keep the Python-facing surface small and stable (functions over exposed Rust types).
+- Prefer abi3 wheels when feasible:
+  - If abi3 is used, set the minimum supported CPython version via the appropriate PyO3 feature
+    (e.g., `abi3-py311`) and treat abi3 constraints as part of the contract.
+  - If abi3 is not feasible (required CPython APIs exceed abi3), document why.
+
+---
+
+## 11) Review guidelines (P0 / P1)
+
+P0 (Required):
+- Parity with Python reference.
+- Correct attach/detach usage (no Python objects while detached).
+- No mandatory dependency on accel.
+
+P1 (Risk):
+- New accelerated domains.
+- Changes to thread defaults or knob priority.
+- New module-level caches or globals.
+
+---
+
+## 12) Definition of done for an accelerator PR
+
+- Core passes tests with no accel installed.
+- Core passes tests with accel installed and the accelerated path is exercised.
+- At least one test explicitly targets the accelerator.
+- Parity verified for representative edge cases.
+- If internal parallelism exists, determinism is tested across thread counts.
+- Benchmarks included for performance claims.
+
+---
+
+## 13) Implementation checklist for a new accelerator function
+
+1) Identify the Python reference function and write down the exact contract:
+   - Inputs, outputs, error behavior, edge cases, determinism expectations.
+
+2) Implement the Rust function with:
+   - Simple signature (primitives preferred).
+   - Clear split between attached conversion and detached compute.
+   - No Python callbacks inside compute.
+   - Convert errors to `PyErr` only after re-attach.
+
+3) If internal parallelism is justified, add a batch API:
+   - Keep scalar API sequential.
+   - Batch API uses bounded Rayon threads controlled by `SIEVIO_ACCEL_THREADS`.
+
+4) Expose via the single compiled module (`sievio_accel._native`) and add a thin Python wrapper.
+
+5) Wire the core import shim to prefer accel when available.
+
+6) Add parity tests against the Python reference.
+
+7) Validate concurrency:
+   - Safe under multiple caller threads.
+   - No unbounded internal parallelism.
+
+8) Run baseline and accelerated test suites.
+
+9) Only then consider micro-optimizations.

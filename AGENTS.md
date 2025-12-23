@@ -36,30 +36,36 @@ pip install -e ".[dev,tok,pdf,evtx,parquet,qc]"
 Run these before proposing changes:
 
 ```bash
-# Run tests
+# Preconditions:
+# - You are in the project venv: `source .venv/bin/activate`
+# - You have an editable install in this venv (recommended): `pip install -e ".[dev,tok,pdf,evtx,parquet,qc]"`
 source .venv/bin/activate
-PYTHONPATH=src pytest
+# Run tests (from the repo root)
+pytest
 
 # Lint & style
-source .venv/bin/activate
 ruff check .
 
 # Type-check
-source .venv/bin/activate
 mypy --config-file pyproject.toml src
+
+# Native accel (optional; only if working on the Rust/PyO3 extension)
+# Run from the accel package directory (the one containing Cargo.toml):
+# python -m maturin develop
+
 ```
 
 Targeted test patterns:
 
 ```bash
 # Run a single test file
-PYTHONPATH=src pytest tests/test_pipeline_middlewares.py
+pytest tests/test_pipeline_middlewares.py
 
 # Run a single test function
-PYTHONPATH=src pytest tests/test_pipeline_middlewares.py::test_record_middleware_adapter_sets_tag
+pytest tests/test_pipeline_middlewares.py::test_record_middleware_adapter_sets_tag
 
 # Run a keyword subset
-PYTHONPATH=src pytest -k "qc and safety"
+pytest -k "qc and safety"
 ```
 
 ---
@@ -156,7 +162,8 @@ P1 (must be called out with risk notes and test evidence):
 
 ### Always verify
 
-- `PYTHONPATH=src pytest`
+- You are in the project venv: `source .venv/bin/activate`
+- `pytest`
 - `ruff check .`
 - `mypy --config-file pyproject.toml src`
 - Schema remains additive, and Safe HTTP + QC/safety modes keep their existing semantics.
@@ -190,7 +197,8 @@ Directory-scoped overrides use `AGENTS.override.md` only when explicitly introdu
 
 A change is "done" when:
 
-- [ ] Tests pass: `PYTHONPATH=src pytest`
+- You are in the project venv: `source .venv/bin/activate`
+- [ ] Tests pass: `pytest`
 - [ ] Lint and type-check are clean: `ruff check .`, `mypy --config-file pyproject.toml src`
 - [ ] No core invariants are broken (registries, Safe HTTP, config semantics, metadata shape)
 - [ ] Relevant docs/examples updated (`README.md`, `LLMS.md`, configs if needed)

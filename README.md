@@ -11,10 +11,11 @@
 - [Sievio](#sievio)
   - [Table of contents](#table-of-contents)
   - [About](#about)
-  - [Built with](#built-with)
+  - [How it works](#how-it-works)
   - [Getting started](#getting-started)
     - [Prerequisites](#prerequisites)
     - [Installation](#installation)
+  - [Documentation](#documentation)
   - [Usage](#usage)
     - [CLI](#cli)
     - [Python](#python)
@@ -25,58 +26,83 @@
 
 ## About
 
-Sievio is designed around a stable “spine”:
+Sievio is a practical ingestion toolkit for building LLM-ready datasets from heterogeneous sources. It normalizes content into a consistent record schema and streams results to JSONL (and optional Parquet), so you can stop maintaining one-off ingestion scripts per source.
+
+Why Sievio?
+
+- **One interface for many inputs:** repos, CSV/SQLite, PDF collections, and EVTX logs.
+- **Reproducible runs:** define datasets in TOML/JSON or Python and rerun them deterministically.
+- **Traceable outputs:** records carry provenance metadata (source, repository context, and other lineage fields).
+- **Safety-minded remote ingestion:** remote fetching is routed through a stdlib-only HTTP client with IP/redirect safeguards.
+
+## How it works
+
+At a glance:
+
+```text
+Inputs                           Pipeline (core)                                Outputs
+[ Local repo / dir  ]   ──┐                                           ┌──   [ JSONL / JSONL.GZ ]
+[ GitHub zipball    ]   ├──> sources → decode → chunk → records ────┼──   [ Parquet (extra)  ]
+[ CSV / SQLite      ]   ├──>                 (+ optional QC)          └──   [ Dataset fragments ]
+[ Web PDFs (extra)  ]   ──┘
+[ EVTX (extra)      ]
+```
+
+Architecture overview (the “stable spine”):
 
 **Config (`SievioConfig`) → Builder (plan/runtime) → Pipeline engine (sources → decode → chunk → records → sinks)**
 
-Key capabilities:
-
-- **Config-first, reproducible runs** (Python or TOML)
-- **Built-in source types**: local directories (gitignore-aware), GitHub zipballs, CSV/TSV, SQLite, and web-PDF URL lists/page scrapes (PDF/EVTX/Parquet handling activates via extras)
-- **Built-in outputs**: JSONL (plain or `.jsonl.gz`) plus optional prompt text; Parquet sink requires the `parquet` extra
-- **Extensible by design** via registries/factories/plugins (sources, sinks, bytes handlers, QC/safety, hooks)
-- **Safe remote ingestion** (GitHub zipballs, web PDFs, SQLite downloads) routed through a stdlib-only HTTP client with IP/redirect safeguards
-- **Language tagging** by default (baseline heuristics); optional `langid` backends via the `langid` extra
-- **Optional quality control + safety screening** (inline/advisory/post); near-duplicate detection and `sievio qc` require the `qc` extra
-- **Dataset card fragments** for downstream publishing workflows
-- **Sharded runs** via `sievio shard` + `sievio merge-stats` helpers for distributed execution
-
-## Built with
-
-- [Python 3.11+](https://www.python.org/)
-- Optional dependencies are installed via extras (see `pyproject.toml`):
-  - `tok`: [tiktoken](https://github.com/openai/tiktoken) (token-aware chunking)
-  - `parquet`: [PyArrow](https://arrow.apache.org/) (Parquet outputs)
-  - `pdf`: [PyPDF](https://pypdf.readthedocs.io/) (PDF extraction)
-  - `qc`: QC/scoring dependencies (torch/transformers)
-  - `evtx`: Windows Event Log support (`python-evtx`)
-  - `langid`: language ID backends (`lingua-language-detector`, `pygments`)
-  - `accel`: optional Rust acceleration (`sievio-accel`)
+If you want the full architecture and module map, start with `docs/TECHNICAL_MANUAL.md`.
 
 ## Getting started
 
 ### Prerequisites
 
-- Python **3.11+**
+* Python **3.11+**
 
 ### Installation
 
+Sievio is typically installed from source in this repository.
+
 ```bash
-# For standard usage (from source)
+# Core (from source)
 pip install .
-# For development (editable mode)
+
+# Development (editable)
 pip install -e .
-# Optional extras (install only what you need):
-pip install -e ".[tok,pdf,parquet,qc,evtx,langid,accel]"
 ```
 
+Optional extras (install only what you need). A few common combinations:
+
+```bash
+# Common: PDF + Parquet + token-aware chunking
+pip install ".[pdf,parquet,tok]"
+
+# QC workflows and scoring (also enables `sievio qc`)
+pip install ".[qc]"
+
+# Full optional feature set for development/power users
+pip install ".[tok,pdf,parquet,qc,evtx,langid,accel]"
+```
+
+Extras reference:
+
+* `tok`: token-aware chunking via `tiktoken`
+* `pdf`: PDF extraction via `pypdf`
+* `parquet`: Parquet outputs via `pyarrow`
+* `qc`: QC and scoring dependencies (for post-hoc scoring and heavier QC workflows)
+* `evtx`: Windows Event Log support (`python-evtx`)
+* `langid`: language ID backends (for more precise language tagging)
+* `accel`: optional Rust acceleration (`sievio-accel`)
+
 ## Documentation
-- Docs index: `docs/README.md`
-- Technical manual: `docs/TECHNICAL_MANUAL.md`
-- Configuration reference (generated): `docs/CONFIGURATION.md`
-- Quality control: `docs/QUALITY_CONTROL.md`
-- Deployment/sharding: `docs/DEPLOYMENT.md`
-- Cookbook recipes: `docs/cookbook/`
+
+* Docs index: `docs/README.md`
+* Technical manual: `docs/TECHNICAL_MANUAL.md`
+* Configuration reference (generated): `docs/CONFIGURATION.md`
+* Quality control: `docs/QUALITY_CONTROL.md`
+* Deployment/sharding: `docs/DEPLOYMENT.md`
+* Cookbook recipes: `docs/cookbook/`
 
 ## Usage
 
@@ -95,10 +121,11 @@ sievio github https://github.com/owner/name out.jsonl
 # Build a dataset card README from per-run fragments
 sievio card --fragments "out/*.card.json" --output README.md
 
-# Post-hoc QC over an existing JSONL (requires the `qc` extra)
+# Post-hoc QC over an existing JSONL (requires `pip install ".[qc]"`)
 sievio qc out.jsonl --csv out_quality.csv
 
 # Generate shard configs from a base config + targets list
+# Note: `--kind web_pdf_list` requires `pip install ".[pdf]"`
 sievio shard --targets targets.txt --base config.toml --shards 8 --out-dir shards/ --kind web_pdf_list
 
 # Run a shard and capture stats JSON (stdout)
@@ -147,15 +174,11 @@ stats = convert(cfg)
 print(stats)
 ```
 
-Documentation:
-
-- Read the technical manual: `docs/TECHNICAL_MANUAL.md`
-
 ## Roadmap
 
-- [ ] More connectors and structured sources
-- [ ] More QC reporting + workflows
-- [ ] More dataset card automation
+* [ ] More connectors and structured sources
+* [ ] More rust acceleration
+* [ ] More QC reporting and workflows
 
 ## Contributing
 
@@ -163,8 +186,8 @@ Contributions are welcome.
 
 **Attention AI agents:** Please read `AGENTS.md` before generating code.
 
-- Project rules, invariants, and required checks: `AGENTS.md`
-- Architecture/module map and “where changes should live”: `LLMS.md`
+* Project rules, invariants, and required checks: `AGENTS.md`
+* Architecture/module map and “where changes should live”: `LLMS.md`
 
 Typical workflow:
 
@@ -179,5 +202,5 @@ Sievio is distributed under the MIT License. See `LICENSE` for details.
 
 ## Contact
 
-- GitHub: https://github.com/jochiraider/sievio
-- Issues: https://github.com/jochiraider/sievio/issues
+* GitHub: [https://github.com/jochiraider/sievio](https://github.com/jochiraider/sievio)
+* Issues: [https://github.com/jochiraider/sievio/issues](https://github.com/jochiraider/sievio/issues)
