@@ -6,6 +6,7 @@ use pyo3::exceptions::PyRuntimeError;
 const DEFAULT_SIMHASH_MAX_TOKENS: usize = 20000;
 const DEFAULT_MINHASH_MAX_SHINGLES: usize = 20000;
 const PRIME32: u64 = 4294967311;
+const MINHASH_SENTINEL: u64 = PRIME32;
 const ADLER_MOD: u32 = 65521;
 
 #[derive(Debug)]
@@ -198,35 +199,18 @@ fn minhash_signature_with_coeffs(
     let max_shingles = normalize_max_shingles(max_shingles);
     let result = py.allow_threads(|| {
         if k == 0 {
-            return Ok(vec![0xFFFF_FFFF; coeffs.len()]);
+            return vec![MINHASH_SENTINEL; coeffs.len()];
         }
 
-        let text_char_len = text_owned.chars().count();
-        if text_char_len < k {
-            return Ok(vec![0xFFFF_FFFF; coeffs.len()]);
-        }
-
-        let mut truncated: Option<String> = None;
-        if let Some(limit) = max_shingles {
-            let char_limit = limit.saturating_add(k.saturating_sub(1));
-            if text_char_len > char_limit {
-                truncated = Some(text_owned.chars().take(char_limit).collect::<String>());
-            }
-        }
-
-        let text_ref = truncated.as_deref().unwrap_or(&text_owned);
-        let mut bytes = text_ref.as_bytes();
+        let mut bytes = text_owned.as_bytes();
         if bytes.len() < k {
-            return Ok(vec![0xFFFF_FFFF; coeffs.len()]);
+            return vec![MINHASH_SENTINEL; coeffs.len()];
         }
 
         if let Some(limit) = max_shingles {
-            let total = bytes.len().saturating_sub(k).saturating_add(1);
-            if total > limit {
-                let byte_limit = limit.saturating_add(k.saturating_sub(1));
-                if bytes.len() > byte_limit {
-                    bytes = &bytes[..byte_limit];
-                }
+            let byte_limit = limit.saturating_add(k.saturating_sub(1));
+            if bytes.len() > byte_limit {
+                bytes = &bytes[..byte_limit];
             }
         }
 
@@ -242,10 +226,10 @@ fn minhash_signature_with_coeffs(
         }
 
         if shingles.is_empty() {
-            return Ok(vec![0xFFFF_FFFF; coeffs.len()]);
+            return vec![MINHASH_SENTINEL; coeffs.len()];
         }
 
-        let mut sig = vec![0xFFFF_FFFFu64; coeffs.len()];
+        let mut sig = vec![MINHASH_SENTINEL; coeffs.len()];
         for x in shingles {
             let x64 = x as u64;
             for (idx, (a, b)) in coeffs.iter().enumerate() {
@@ -258,9 +242,9 @@ fn minhash_signature_with_coeffs(
             }
         }
 
-        Ok(sig)
+        sig
     });
-    result.map_err(|err: HashError| PyRuntimeError::new_err(err.to_string()))
+    Ok(result)
 }
 
 #[pymodule]

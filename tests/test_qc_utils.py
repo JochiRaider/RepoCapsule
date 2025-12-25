@@ -1,5 +1,6 @@
 import hashlib
 import random
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -92,22 +93,53 @@ def test_minhash_signature_supports_large_perm_counts_deterministically():
     text = "abcdefg " * 200
     sig = minhash_signature_for_text(text, k=5, n_perm=256)
     assert len(sig) == 256
-    assert any(val != 0xFFFFFFFF for val in sig[128:])
+    assert any(val != qc_utils._MINHASH_SENTINEL for val in sig[128:])
     assert sig == minhash_signature_for_text(text, k=5, n_perm=256)
     assert sig[:128] == minhash_signature_for_text(text, k=5, n_perm=128)
+
+
+def test_minhash_sentinel_allows_large_values(monkeypatch):
+    monkeypatch.setattr(qc_utils, "_MINHASH_COEFS", [(1, qc_utils._PRIME32 - 1)])
+    sig = qc_utils._minhash_signature({0}, n_perm=1)
+    assert sig == (qc_utils._PRIME32 - 1,)
+    assert qc_utils._MINHASH_SENTINEL == qc_utils._PRIME32
 
 
 def test_minhash_signature_caps_shingles_consistently():
     text = "abcd " * 200
     k = 4
     max_shingles = 20
-    truncated = text[: max_shingles + k - 1]
-    assert minhash_signature_for_text(
-        text,
-        k=k,
-        n_perm=32,
-        max_shingles=max_shingles,
-    ) == minhash_signature_for_text(truncated, k=k, n_perm=32, max_shingles=None)
+    enc = text.encode("utf-8", "ignore")
+    if len(enc) > max_shingles + k - 1:
+        enc = enc[: max_shingles + k - 1]
+    shingles: set[int] = set()
+    for i in range(0, len(enc) - k + 1):
+        gram = enc[i : i + k]
+        if not any(c > 32 for c in gram):
+            continue
+        shingles.add(zlib.adler32(gram) & 0xFFFFFFFF)
+    expected = qc_utils._minhash_signature(shingles, n_perm=32)
+    assert (
+        minhash_signature_for_text(
+            text,
+            k=k,
+            n_perm=32,
+            max_shingles=max_shingles,
+        )
+        == expected
+    )
+
+
+def test_minhash_signature_uses_byte_k_grams_for_unicode():
+    text = "éé"
+    sig = minhash_signature_for_text(text, k=3, n_perm=8)
+    assert any(val != qc_utils._MINHASH_SENTINEL for val in sig)
+
+
+def test_minhash_signature_skips_all_whitespace_shingles():
+    text = " \n\t" * 50
+    sig = minhash_signature_for_text(text, k=3, n_perm=8)
+    assert all(val == qc_utils._MINHASH_SENTINEL for val in sig)
 
 
 def test_minhash_signature_treats_non_positive_max_shingles_as_none():

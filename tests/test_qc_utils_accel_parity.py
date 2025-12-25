@@ -68,6 +68,72 @@ def test_minhash_non_positive_max_shingles_matches_python(monkeypatch):
     assert accel_sig == python_sig
 
 
+def test_simhash_huge_max_tokens_matches_python(monkeypatch):
+    text = "Token"
+    huge = 10**20
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "0")
+    python_val = qc_utils.simhash64(text, max_tokens=huge)
+
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "1")
+    accel_val = qc_utils.simhash64(text, max_tokens=huge)
+    assert accel_val == python_val
+
+
+def test_minhash_huge_max_shingles_matches_python(monkeypatch):
+    text = "abcd " * 200
+    k = 4
+    n_perm = 32
+    huge = 10**20
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "0")
+    python_sig = qc_utils.minhash_signature_for_text(
+        text,
+        k=k,
+        n_perm=n_perm,
+        max_shingles=huge,
+    )
+
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "1")
+    accel_sig = qc_utils.minhash_signature_for_text(
+        text,
+        k=k,
+        n_perm=n_perm,
+        max_shingles=huge,
+    )
+    assert accel_sig == python_sig
+
+
+def test_minhash_whitespace_shingles_match_python(monkeypatch):
+    text = " \n\t" * 50
+    k = 3
+    n_perm = 8
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "0")
+    python_sig = qc_utils.minhash_signature_for_text(text, k=k, n_perm=n_perm)
+
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "1")
+    accel_sig = qc_utils.minhash_signature_for_text(text, k=k, n_perm=n_perm)
+    assert accel_sig == python_sig
+
+
+def test_minhash_unicode_byte_k_grams_match_python(monkeypatch):
+    text = "éé"
+    k = 3
+    n_perm = 16
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "0")
+    python_sig = qc_utils.minhash_signature_for_text(text, k=k, n_perm=n_perm)
+
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "1")
+    accel_sig = qc_utils.minhash_signature_for_text(text, k=k, n_perm=n_perm)
+    assert accel_sig == python_sig
+
+
 def test_accel_minhash_deterministic_under_threads(monkeypatch):
     text = "abcdefg " * 200
     k = 5

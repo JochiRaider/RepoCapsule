@@ -452,6 +452,7 @@ class SimHashWindowIndex:
 
 # ---------- MinHash + LSH ----------
 _PRIME32 = 4294967311
+_MINHASH_SENTINEL = _PRIME32
 _MINHASH_SEED = 0x5EED5EED
 _MINHASH_MAX_PERMS = 8192
 _MINHASH_RNG = random.Random(_MINHASH_SEED)
@@ -481,20 +482,17 @@ def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
 
 
 def _shingle_hashes(text: str, k: int = 5, *, max_shingles: int | None = None) -> set[int]:
-    """Build hashed byte k-grams, skipping all-whitespace shingles."""
-    if len(text) < k:
-        return set()
+    """Build hashed byte k-grams (UTF-8), skipping all-whitespace shingles."""
     out: set[int] = set()
     if max_shingles is None:
         max_shingles = _DEFAULT_MINHASH_MAX_SHINGLES
     if max_shingles is not None and max_shingles <= 0:
         max_shingles = None
-    if max_shingles is not None:
-        text = text[: max_shingles + k - 1]
     enc = text.encode("utf-8", "ignore")
+    if len(enc) < k:
+        return out
     if max_shingles is not None:
-        total = len(enc) - k + 1
-        if total > max_shingles:
+        if len(enc) > max_shingles + k - 1:
             enc = enc[: max_shingles + k - 1]
     for i in range(0, len(enc) - k + 1):
         gram = enc[i : i + k]
@@ -507,9 +505,9 @@ def _shingle_hashes(text: str, k: int = 5, *, max_shingles: int | None = None) -
 def _minhash_signature(shingles: set[int], n_perm: int = 128) -> tuple[int, ...]:
     """Compute a MinHash signature from a set of hashed shingles."""
     if not shingles:
-        return tuple([0xFFFFFFFF] * n_perm)
+        return tuple([_MINHASH_SENTINEL] * n_perm)
     coef = _minhash_coeffs(n_perm)
-    sig = [0xFFFFFFFF] * n_perm
+    sig = [_MINHASH_SENTINEL] * n_perm
     for x in shingles:
         for i, (a, b) in enumerate(coef):
             v = (a * x + b) % _PRIME32
@@ -541,6 +539,8 @@ def minhash_signature_for_text(
         raise ValueError(
             f"n_perm must be <= {_MINHASH_MAX_PERMS}; got {n_perm!r}."
         )
+    if max_shingles is not None and max_shingles <= 0:
+        max_shingles = None
     use_accel = max_shingles is None or max_shingles > 0
     accel = _qc_accel() if use_accel or accel_required() else None
     if accel is not None and use_accel:

@@ -19,6 +19,18 @@ _MINHASH_MAX_PERMS = 8192
 _MINHASH_RNG = random.Random(_MINHASH_SEED)
 _MINHASH_COEFS: list[tuple[int, int]] = []
 _MINHASH_LOCK = threading.Lock()
+_MAX_I64 = (1 << 63) - 1
+_MIN_I64 = -(1 << 63)
+
+
+def _clamp_i64(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if value > _MAX_I64:
+        return _MAX_I64
+    if value < _MIN_I64:
+        return _MIN_I64
+    return value
 
 
 def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
@@ -44,6 +56,7 @@ def _minhash_coeffs(n_perm: int) -> list[tuple[int, int]]:
 
 def simhash64(text: str, *, max_tokens: int | None = None) -> int:
     """Compute a 64-bit Simhash fingerprint using the native extension."""
+    max_tokens = _clamp_i64(max_tokens)
     return int(_qc_native.simhash64(text, max_tokens))
 
 
@@ -60,6 +73,7 @@ def minhash_signature_with_coeffs(
         raise ValueError(
             f"coeffs length {len(coeffs)!r} does not match n_perm={n_perm!r}."
         )
+    max_shingles = _clamp_i64(max_shingles)
     sig = _qc_native.minhash_signature_with_coeffs(
         text,
         k,
