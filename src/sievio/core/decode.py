@@ -4,27 +4,58 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata as _ud
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import IO, Callable, Literal, Protocol
 
 from .log import get_logger
 
 __all__ = [
     "decode_bytes",            # public API
-    "read_text",               # returns Decoded
+    "read_decoded_text",       # returns DecodedText
+    "read_text",               # returns str
 ]
 
 
 @dataclass(slots=True, frozen=True)
+class DecodeProvenance:
+    """Provenance for decode and post-processing transformations."""
+
+    decode_replacements: bool = False
+    mojibake_repaired: bool = False
+    controls_stripped: int = 0
+    newlines_normalized: bool = False
+    unicode_normalized: bool = False
+
+    @property
+    def lossy(self) -> bool:
+        """Return True when decoding or postprocess removed/replaced characters."""
+        return self.decode_replacements or self.controls_stripped > 0
+
+    @property
+    def changed(self) -> bool:
+        """Return True when any transformation modified the decoded text."""
+        return (
+            self.decode_replacements
+            or self.mojibake_repaired
+            or self.controls_stripped > 0
+            or self.newlines_normalized
+            or self.unicode_normalized
+        )
+
+
+@dataclass(slots=True, frozen=True)
 class DecodedText:
-    """Decoded text content with encoding metadata."""
+    """Decoded text content with encoding metadata and provenance flags."""
 
     text: str
     encoding: str
     had_replacement: bool
+    provenance: DecodeProvenance = DecodeProvenance()
 
 log = get_logger(__name__)
 
@@ -43,7 +74,7 @@ _BOMS: tuple[tuple[bytes, str], ...] = (
 
 def _detect_bom(data: bytes) -> str | None:
     """Return encoding implied by a BOM if present."""
-    for sig, enc in _BOMS:
+    for sig, enc in sorted(_BOMS, key=lambda item: len(item[0]), reverse=True):
         if data.startswith(sig):
             return enc
     return None
@@ -89,29 +120,45 @@ _ZERO_WIDTH = {
 }
 
 
-def _normalize_newlines(s: str) -> str:
+def _normalize_newlines(s: str) -> tuple[str, bool]:
     """Normalize CRLF and CR-only sequences to LF."""
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    return s
+    normalized = s.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized, normalized != s
 
 
-def _strip_unsafe_controls(s: str) -> str:
+def _strip_unsafe_controls(s: str) -> tuple[str, int]:
     """Strip control and zero-width characters while keeping TAB and LF."""
-    return "".join(
+    filtered = "".join(
         ch for ch in s
         if (ch == "\n" or ch == "\t" or _ud.category(ch)[0] != "C") and ord(ch) not in _ZERO_WIDTH
     )
+    return filtered, max(0, len(s) - len(filtered))
 
 
 NormalizeForm = Literal["NFC", "NFD", "NFKC", "NFKD"]
 
 
-def _unicode_normalize(s: str, *, form: NormalizeForm = "NFC") -> str:
+class DecodeFunc(Protocol):
+    """Protocol for byte-to-text decoding helpers."""
+
+    def __call__(
+        self,
+        data: bytes,
+        *,
+        normalize: NormalizeForm | None = "NFC",
+        strip_controls: bool = True,
+        fix_mojibake: bool = True,
+    ) -> DecodedText:
+        ...
+
+
+def _unicode_normalize(s: str, *, form: NormalizeForm = "NFC") -> tuple[str, bool]:
     """Apply Unicode normalization, falling back to the original string."""
     try:
-        return _ud.normalize(form, s)
+        normalized = _ud.normalize(form, s)
     except Exception:
-        return s
+        return s, False
+    return normalized, normalized != s
 
 
 # ----------------------
@@ -138,10 +185,12 @@ def _maybe_repair_cp1252_utf8(text_cp1252: str) -> str:
     Returns:
         str: Repaired or original text, whichever looks cleaner.
     """
+    if _mojibake_score(text_cp1252) == 0:
+        return text_cp1252
     try:
-        raw = text_cp1252.encode("cp1252", errors="ignore")
+        raw = text_cp1252.encode("cp1252", errors="strict")
         fixed = raw.decode("utf-8", errors="strict")
-    except Exception:
+    except (UnicodeEncodeError, UnicodeDecodeError):
         return text_cp1252
     # Accept the repair only if it *reduces* the mojibake noise.
     fixed_score = _mojibake_score(fixed)
@@ -165,7 +214,7 @@ def decode_bytes(
     Strategy:
       1) Honor BOMs for UTF-8/16/32; utf-8-sig strips the BOM.
       2) Try UTF-8 strictly; if it fails, guess UTF-16 endianness by NULs.
-      3) Fallback to cp1252 strictly, else latin-1 with optional mojibake fix.
+      3) Try cp1252 strictly, else latin-1 with optional mojibake fix.
       4) Normalize newlines, strip controls, and apply Unicode normalization.
 
     Args:
@@ -175,10 +224,29 @@ def decode_bytes(
         fix_mojibake (bool): Whether to attempt cp1252/UTF-8 mojibake repair.
 
     Returns:
-        DecodedText: Text plus encoding and replacement indicator.
+        DecodedText: Text plus encoding and provenance metadata. The
+        ``had_replacement`` flag indicates replacement characters were
+        introduced during decoding (not post-processing).
     """
     if not data:
-        return DecodedText("", "utf-8", False)
+        return DecodedText("", "utf-8", False, DecodeProvenance())
+
+    def _finalize(
+        text: str,
+        encoding: str,
+        *,
+        decode_replacements: bool,
+        mojibake_repaired: bool,
+    ) -> DecodedText:
+        processed, post = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
+        provenance = DecodeProvenance(
+            decode_replacements=decode_replacements,
+            mojibake_repaired=mojibake_repaired,
+            controls_stripped=post.controls_stripped,
+            newlines_normalized=post.newlines_normalized,
+            unicode_normalized=post.unicode_normalized,
+        )
+        return DecodedText(processed, encoding, decode_replacements, provenance)
 
     # 1) BOM-driven decode
     enc = _detect_bom(data)
@@ -186,16 +254,14 @@ def decode_bytes(
         try:
             # For utf-8-sig, BOM is automatically stripped.
             text = data.decode(enc, errors="strict")
-            text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-            return DecodedText(text, enc, "\ufffd" in text)
-        except Exception:
+            return _finalize(text, enc, decode_replacements=False, mojibake_repaired=False)
+        except UnicodeDecodeError:
             pass  # fall through
 
     # 2) UTF-8 first
     try:
         text = data.decode("utf-8", errors="strict")
-        text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-        return DecodedText(text, "utf-8", "\ufffd" in text)
+        return _finalize(text, "utf-8", decode_replacements=False, mojibake_repaired=False)
     except UnicodeDecodeError:
         pass
 
@@ -204,35 +270,97 @@ def decode_bytes(
     if guess:
         try:
             text = data.decode(guess, errors="strict")
-            text = _postprocess(text, normalize=normalize, strip_controls=strip_controls)
-            return DecodedText(text, guess, "\ufffd" in text)
-        except Exception:
+            return _finalize(text, guess, decode_replacements=False, mojibake_repaired=False)
+        except UnicodeDecodeError:
             pass
 
-    # 3) cp1252 fallback (always succeeds), with optional mojibake repair
+    # 3) cp1252 fallback with optional mojibake repair
     try:
         text1252 = data.decode("cp1252", errors="strict")
         enc_used = "cp1252"
-    except Exception:
+        decode_replacements = False
+    except UnicodeDecodeError:
         # As a last resort, latin-1 (will never fail)
         text1252 = data.decode("latin-1", errors="replace")
         enc_used = "latin-1"
+        decode_replacements = "\ufffd" in text1252
 
+    mojibake_repaired = False
     if fix_mojibake:
-        text1252 = _maybe_repair_cp1252_utf8(text1252)
+        repaired = _maybe_repair_cp1252_utf8(text1252)
+        mojibake_repaired = repaired != text1252
+        text1252 = repaired
 
-    text = _postprocess(text1252, normalize=normalize, strip_controls=strip_controls)
-    return DecodedText(text, enc_used, "\ufffd" in text)
+    return _finalize(
+        text1252,
+        enc_used,
+        decode_replacements=decode_replacements,
+        mojibake_repaired=mojibake_repaired,
+    )
 
 
-def _postprocess(s: str, *, normalize: NormalizeForm | None, strip_controls: bool) -> str:
+@dataclass(slots=True, frozen=True)
+class PostprocessResult:
+    """Track post-processing changes applied to decoded text."""
+
+    newlines_normalized: bool = False
+    controls_stripped: int = 0
+    unicode_normalized: bool = False
+
+
+def _postprocess(
+    s: str,
+    *,
+    normalize: NormalizeForm | None,
+    strip_controls: bool,
+) -> tuple[str, PostprocessResult]:
     """Normalize newlines, strip controls, and apply Unicode normalization."""
-    s = _normalize_newlines(s)
+    s, newlines_normalized = _normalize_newlines(s)
     if strip_controls:
-        s = _strip_unsafe_controls(s)
+        s, controls_stripped = _strip_unsafe_controls(s)
+    else:
+        controls_stripped = 0
     if normalize:
-        s = _unicode_normalize(s, form=normalize)
-    return s
+        s, unicode_normalized = _unicode_normalize(s, form=normalize)
+    else:
+        unicode_normalized = False
+    return s, PostprocessResult(
+        newlines_normalized=newlines_normalized,
+        controls_stripped=controls_stripped,
+        unicode_normalized=unicode_normalized,
+    )
+
+
+def read_decoded_text(
+    path: str | bytes | Path,
+    *,
+    max_bytes: int | None = None,
+    normalize: NormalizeForm | None = "NFC",
+    strip_controls: bool = True,
+    fix_mojibake: bool = True,
+    opener: Callable[[], IO[bytes]] | None = None,
+    decoder: DecodeFunc = decode_bytes,
+) -> DecodedText | None:
+    """Read file bytes and decode them, returning a structured result or None."""
+    if isinstance(path, bytes):
+        path = os.fsdecode(path)
+    p = Path(path)
+    try:
+        if opener is not None:
+            with closing(opener()) as f:
+                data = f.read(max_bytes) if max_bytes is not None else f.read()
+        else:
+            with p.open("rb") as f:
+                data = f.read(max_bytes) if max_bytes is not None else f.read()
+    except (OSError, ValueError) as e:
+        log.warning("read_decoded_text: failed to read %s: %s", p, e)
+        return None
+    return decoder(
+        data,
+        normalize=normalize,
+        strip_controls=strip_controls,
+        fix_mojibake=fix_mojibake,
+    )
 
 
 def read_text(
@@ -242,6 +370,8 @@ def read_text(
     normalize: NormalizeForm | None = "NFC",
     strip_controls: bool = True,
     fix_mojibake: bool = True,
+    opener: Callable[[], IO[bytes]] | None = None,
+    decoder: DecodeFunc = decode_bytes,
 ) -> str:
     """Read file bytes and decode them to a text string.
 
@@ -251,23 +381,21 @@ def read_text(
         normalize (str | None): Unicode normalization form such as "NFC".
         strip_controls (bool): Remove control and zero-width characters.
         fix_mojibake (bool): Attempt to repair UTF-8-as-cp1252 mojibake.
+        opener (Callable[[], IO[bytes]] | None): Optional stream opener for
+            policy-controlled file access. When set, ``path`` is used only
+            for logging.
+        decoder (DecodeFunc): Decoder function to turn bytes into text.
 
     Returns:
         str: Decoded text content; empty on read failure.
     """
-    if isinstance(path, bytes):
-        path = path.decode(errors="replace")
-    p = Path(path)
-    try:
-        with p.open("rb") as f:
-            data = f.read(max_bytes) if max_bytes else f.read()
-    except OSError as e:
-        log.warning("read_text: failed to read %s: %s", p, e)
-        return ""
-    dec = decode_bytes(
-        data,
+    dec = read_decoded_text(
+        path,
+        max_bytes=max_bytes,
         normalize=normalize,
         strip_controls=strip_controls,
         fix_mojibake=fix_mojibake,
+        opener=opener,
+        decoder=decoder,
     )
-    return dec.text
+    return dec.text if dec is not None else ""
