@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import sys
 import types
 
@@ -57,8 +58,55 @@ def test_accel_shim_require_raises_when_missing(monkeypatch):
     monkeypatch.setattr(
         accel_utils.importlib,
         "import_module",
-        lambda _: (_ for _ in ()).throw(ModuleNotFoundError("sievio_accel.qc")),
+        lambda _: (_ for _ in ()).throw(
+            ModuleNotFoundError("No module named 'sievio_accel.qc'", name="sievio_accel.qc")
+        ),
     )
 
     with pytest.raises(RuntimeError):
         qc_utils.simhash64("hello")
+
+
+def test_accel_shim_auto_absence_is_silent(monkeypatch, caplog):
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "auto")
+    monkeypatch.setattr(
+        accel_utils.importlib,
+        "import_module",
+        lambda _: (_ for _ in ()).throw(
+            ModuleNotFoundError("No module named 'sievio_accel.qc'", name="sievio_accel.qc")
+        ),
+    )
+
+    caplog.set_level(logging.WARNING)
+    text = "Token"
+    expected = int.from_bytes(
+        hashlib.blake2b(text.lower().encode("utf-8"), digest_size=8).digest(),
+        "little",
+    )
+    assert qc_utils.simhash64(text) == expected
+    assert accel_utils.get_accel_failure("qc") is None
+    assert not caplog.records
+
+
+def test_accel_shim_auto_failure_warns_once(monkeypatch, caplog):
+    accel_utils._reset_accel_cache_for_tests()
+    monkeypatch.setenv("SIEVIO_ACCEL", "auto")
+    monkeypatch.setattr(
+        accel_utils.importlib,
+        "import_module",
+        lambda _: (_ for _ in ()).throw(
+            ModuleNotFoundError("No module named 'missing_dep'", name="missing_dep")
+        ),
+    )
+
+    caplog.set_level(logging.WARNING)
+    text = "Token"
+    expected = int.from_bytes(
+        hashlib.blake2b(text.lower().encode("utf-8"), digest_size=8).digest(),
+        "little",
+    )
+    assert qc_utils.simhash64(text) == expected
+    assert qc_utils.simhash64(text) == expected
+    assert accel_utils.get_accel_failure("qc") is not None
+    assert len(caplog.records) == 1

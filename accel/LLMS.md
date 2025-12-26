@@ -42,7 +42,7 @@ Terminology note:
 - Modern PyO3 uses `Python::attach` / `Python::detach` to reflect free-threaded Python support.
   Older PyO3 used `Python::with_gil` / `Python::allow_threads`. Code should use the pinned version;
   policy text uses attach/detach terminology.
-- The pinned PyO3 version in accel/Cargo.toml is authoritative for which API names are used.
+- Implementation note: In the pinned PyO3 version used by this repo, the detached compute phase is implemented via `Python::allow_threads` (policy remains “attached conversion → detached compute → attached wrapping”).
 
 Rules:
 - CPU-bound Rust must detach for the compute phase using the pinned PyO3 API.
@@ -59,6 +59,7 @@ Rules:
 
 ## 4) Threading policy (default sequential; parallel only when amortized)
 
+- Current status: There is no internal parallelism today; acceleration uses GIL release during CPU-bound compute (via the pinned PyO3 detach/`allow_threads` API). Determinism constraints still apply.
 - Scalar functions default to sequential execution.
 - Batch functions may use internal parallelism (e.g., Rayon) when enabled by the thread budget.
 - Avoid nested parallelism:

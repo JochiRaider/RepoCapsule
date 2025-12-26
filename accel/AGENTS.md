@@ -68,10 +68,22 @@ Implementation shape:
 ## 4) Import shim pattern (core stays authoritative)
 
 In core Python modules (e.g., `src/sievio/core/accel.py`):
-- Core Python should import accel only in the shim module; all other modules call through the shim.
 - Import accelerated functions behind a single local indirection layer.
 - Otherwise use the existing Python implementation.
 - Do not scatter `try/except ImportError` throughout the file.
+
+---
+
+## 4a) Runtime knobs (core accel loader)
+
+- `SIEVIO_ACCEL=auto` (default): Best-effort. The core attempts to load accelerators for a given domain and falls back to the pure-Python implementation if accel is unavailable. Intended for normal developer runs and production-like use where accel is optional.
+- `SIEVIO_ACCEL=off`: Disable accel entirely (always use pure-Python). Intended for debugging, baseline benchmarking, and verifying “no accel installed” behavior without changing the environment.
+- `SIEVIO_ACCEL=require`: Enforce accel. If the accel module for a requested domain cannot be loaded, the core fails fast. Intended for CI and performance validation runs where you must guarantee the accelerated path is exercised.
+
+Canonical loader (single import shim):
+- Core code must resolve accel availability only via `src/sievio/core/accel.py: load_accel(domain)`.
+- Do not import `sievio_accel.*` directly from arbitrary core modules and do not scatter `try/except ImportError` across files.
+- The `domain` string corresponds to the Python submodule `sievio_accel.<domain>` (for example: `qc`).
 
 ---
 
@@ -126,7 +138,8 @@ Core rules:
    - Scalar APIs default to sequential.
    - Batch APIs may use Rayon when enabled by the thread budget and when overhead is amortized.
    - Default to 1 thread: batch APIs remain sequential unless `SIEVIO_ACCEL_THREADS > 1`.
-
+   - Current status: The accel implementation is single-threaded today (no internal Rayon parallelism). The thread-budget rules (`SIEVIO_ACCEL_THREADS`, nested parallelism guidance, and cross-thread-count determinism testing) apply once batch APIs adopt internal parallelism.
+  
 4) Unified control (one knob wins):
    - Primary knob: `SIEVIO_ACCEL_THREADS` (default 1).
    - Define ‘initialization’ as Rust module initialization (extension import) unless the implementation explicitly documents otherwise.
